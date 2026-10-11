@@ -231,7 +231,8 @@ const SHIP_PROMPT = `The work is finished. Ship it on GitHub, in order, and stop
    Reply exactly: Approve merge <full SHA>
    Anything else leaves the pull request open.
 7. Only after I reply exactly "Approve merge <that SHA>", read the head commit again. If it changed, ask again. If it
-   matches, run gh pr merge --squash --delete-branch --match-head-commit <full SHA>. Any other reply: leave the pull request open.
+   matches, run gh pr merge --squash --delete-branch --match-head-commit <full SHA> as a command of its own, with
+   nothing chained before or after it. Any other reply: leave the pull request open.
    Never merge with --admin or --auto, or bypass branch protection in any other way; if the merge is blocked, say why and stop.
 8. End with the pull request link and one line on the result.`
 

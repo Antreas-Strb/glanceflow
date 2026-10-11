@@ -1958,6 +1958,27 @@ test('unsafeMerge lets a merge through only at the approved head commit, never w
   expect(unsafeMerge(`bash -c "${mergeAt(SHA)}"`, SHA)).toBeNull()
 })
 
+test('unsafeMerge refuses an approved merge that shares its command with anything that could hide its exit code', () => {
+  expect(unsafeMerge(`  ${mergeAt(SHA)}\n`, SHA)).toBeNull()
+  for (const command of [
+    `${mergeAt(SHA)}; echo "exit=$?"`,
+    `${mergeAt(SHA)}; true`,
+    `${mergeAt(SHA)} || true`,
+    `${mergeAt(SHA)} | cat`,
+    `${mergeAt(SHA)} && echo ok`,
+    `${mergeAt(SHA)} &`,
+    `${mergeAt(SHA)};`,
+    `git status; ${mergeAt(SHA)}`,
+    `bash -c "${mergeAt(SHA)}; true"`,
+    `bash -c "${mergeAt(SHA)}"; echo done`,
+  ]) {
+    expect(runsPrMerge(command)).toBe(true)
+    expect(unsafeMerge(command, SHA)).toContain('on its own')
+  }
+  // Without the approval, the approval comes first.
+  expect(unsafeMerge(`${mergeAt(SHA)}; true`, null)).toContain('Approve merge')
+})
+
 test('askedMergeSha reads the full head commit from the approval line', () => {
   expect(askedMergeSha(`Checks passed.\nReply exactly: Approve merge ${SHA}\nAnything else leaves the pull request open.`)).toBe(SHA)
   expect(askedMergeSha(`Reply exactly: \`Approve merge ${SHA}\``)).toBe(SHA)
@@ -2050,6 +2071,24 @@ test('a failed merge keeps Ship it guarded until a fresh exact approval; one app
   failMerges(false)
   expect(await tries(mergeAt(SHA))).toBeUndefined()
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
+})
+
+test('a merge whose exit code the rest of its command could hide is refused, so it neither ends Ship it nor uses the approval', async ($, on) => {
+  const { ask, tries, failMerges } = await shipping($, on)
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  // Bash reports these as successes even when gh pr merge fails, since the last command decides the exit code.
+  for (const command of [`${mergeAt(SHA)}; echo "exit=$?"`, `${mergeAt(SHA)}; true`, `${mergeAt(SHA)} || true`]) {
+    expect(await tries(command)).toContain('on its own')
+  }
+  // Still guarded, and the approval is unused: the merge on its own runs once, and after it fails
+  // the next try, compound or not, needs a fresh approval.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  failMerges(true)
+  expect(await tries(mergeAt(SHA))).toBeUndefined()
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+  expect(await tries(`${mergeAt(SHA)}; true`)).toContain('Approve merge')
 })
 
 test('a new merge request for a moved head replaces the pending one, and an approval lasts only for its turn', async ($, on) => {

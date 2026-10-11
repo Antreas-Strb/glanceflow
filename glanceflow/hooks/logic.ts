@@ -502,8 +502,8 @@ export const runsPrMerge = (command: string) => ghPieces(command).some(piece => 
 
 /**
  * Why a shell command may not run during Ship it, or null when it may. Every `gh pr merge` it runs, wrapped in
- * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto;
- * merging through `gh api` is never allowed.
+ * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto, and is
+ * the whole command, so a failed merge is never read as a success; merging through `gh api` is never allowed.
  */
 export function unsafeMerge(command: string, approvedSha: string | null): string | null {
   for (const part of ghPieces(command)) {
@@ -521,6 +521,10 @@ export function unsafeMerge(command: string, approvedSha: string | null): string
         'checks and the full head SHA, then "Reply exactly: Approve merge <full SHA>", and wait for exactly that reply. ' +
         'Then run gh pr merge --squash --delete-branch --match-head-commit <that full SHA>.'
       )
+    }
+    // The tool's exit code is the merge's own only when nothing else runs: `; true`, `|| true` or `| cat` hide a failure.
+    if (ghPieces(command.trim()).length > 1) {
+      return 'Run the approved gh pr merge on its own, with nothing before or after it, so its exit code shows whether it merged.'
     }
   }
   return null
