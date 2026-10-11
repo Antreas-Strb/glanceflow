@@ -141,7 +141,7 @@ Biggest tasks
 3. Make a Conventional Commits commit on a branch, never the base branch.
 4. Open a ready pull request with Why, What changed and Verification.
 5. Run `gh pr checks --watch`. Passing checks are not permission to merge: Claude shows the pull request link, the checks and the full head SHA, and asks you to reply exactly `Approve merge <SHA>`. Any other reply leaves the pull request open.
-6. Only after that exact reply, run `gh pr merge --squash --delete-branch --match-head-commit <SHA>`. If the head changed, Claude asks again. It never merges with `--admin` or `--auto` or gets around branch protection: if the merge is blocked, Claude says why and stops. While Ship it runs, GlanceFlow blocks direct merge commands it can inspect unless they use the exact SHA you approved and run on their own, so a failed merge can't pass for a successful one.
+6. Only after that exact reply, run `gh pr merge --squash --delete-branch --match-head-commit <SHA>`. If the head changed, Claude asks again. It never merges with `--admin` or `--auto` or gets around branch protection: if the merge is blocked, Claude says why and stops. While Ship it runs, GlanceFlow blocks direct merge commands it can inspect unless they use the exact SHA you approved and run on their own, so a failed merge can't pass for a successful one. A merge run through a wrapper such as `env`, `sudo`, `eval` or `( … )` is always blocked.
 
 The steps follow the finish flow of [Ponytail](https://github.com/DietrichGebert/ponytail), [pstack](https://github.com/backnotprop/pstack) and Cursor's thermo-nuclear code quality review. In the Desktop app, **Settings → Claude Code → Auto-archive sessions when their pull request closes** then archives the chat.
 

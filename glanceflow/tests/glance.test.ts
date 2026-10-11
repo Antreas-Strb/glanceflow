@@ -1950,12 +1950,50 @@ test('unsafeMerge lets a merge through only at the approved head commit, never w
     'echo "gh pr merge later"',
     'grep "gh pr merge" README.md',
     'gh pr view 12 --json headRefOid',
+    'git commit -m "run sudo gh pr merge later"',
+    "echo 'env gh pr merge'",
+    'git commit -m "wrap it in bash -c gh pr merge"',
   ]) {
     expect(runsPrMerge(command)).toBe(false)
     expect(unsafeMerge(command, null)).toBeNull()
   }
   expect(runsPrMerge(`bash -c "${mergeAt(SHA)}"`)).toBe(true)
   expect(unsafeMerge(`bash -c "${mergeAt(SHA)}"`, SHA)).toBeNull()
+})
+
+// gh pr merge, or a gh api merge route, run through a shell wrapper instead of on its own.
+const WRAPPED_MERGES = [
+  `(${mergeAt(SHA)})`,
+  `! ${mergeAt(SHA)}`,
+  `env ${mergeAt(SHA)}`,
+  `env GH_TOKEN=x ${mergeAt(SHA)}`,
+  `command ${mergeAt(SHA)}`,
+  `sudo ${mergeAt(SHA)}`,
+  `sudo -u me ${mergeAt(SHA)}`,
+  `exec ${mergeAt(SHA)}`,
+  `time ${mergeAt(SHA)}`,
+  `GH_REPO=me/site ${mergeAt(SHA)}`,
+  `{ ${mergeAt(SHA)}; }`,
+  `/usr/local/bin/${mergeAt(SHA)}`,
+  `\\${mergeAt(SHA)}`,
+  `sudo bash -c "${mergeAt(SHA)}"`,
+  `bash -lc "${mergeAt(SHA)}"`,
+  `eval "${mergeAt(SHA)}"`,
+  `bash -c "env ${mergeAt(SHA)}"`,
+  'echo 12 | xargs gh pr merge --squash',
+  '(gh api -X PUT repos/me/site/pulls/12/merge)',
+  'env gh api -X PUT repos/me/site/pulls/12/merge',
+  'command gh api -X PUT repos/me/site/pulls/12/merge',
+  "sudo gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'",
+  'eval "gh api -X PUT repos/me/site/pulls/12/merge"',
+]
+
+test('unsafeMerge refuses gh pr merge and gh api merges run through a shell wrapper, approved or not', () => {
+  for (const command of WRAPPED_MERGES) {
+    expect(unsafeMerge(command, null)).not.toBeNull()
+    expect(unsafeMerge(command, SHA)).not.toBeNull()
+  }
+  expect(unsafeMerge(`env ${mergeAt(SHA)}`, SHA)).toContain('directly')
 })
 
 test('unsafeMerge refuses an approved merge that shares its command with anything that could hide its exit code', () => {
@@ -2089,6 +2127,19 @@ test('a merge whose exit code the rest of its command could hide is refused, so 
   expect(await tries(mergeAt(SHA))).toBeUndefined()
   expect(await tries(mergeAt(SHA))).toContain('Approve merge')
   expect(await tries(`${mergeAt(SHA)}; true`)).toContain('Approve merge')
+})
+
+test('a merge through a shell wrapper is refused before and after approval, and never uses the approval', async ($, on) => {
+  const { ask, tries } = await shipping($, on)
+  for (const command of WRAPPED_MERGES) expect(await tries(command)).toBeDefined()
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of WRAPPED_MERGES) expect(await tries(command)).toBeDefined()
+  // Still guarded, and the approval is unused: the plain merge runs, works, and ends Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  expect(await tries(mergeAt(SHA))).toBeUndefined()
+  expect(await tries('env gh pr merge 12 --squash')).toBeUndefined()
 })
 
 test('a new merge request for a moved head replaces the pending one, and an approval lasts only for its turn', async ($, on) => {

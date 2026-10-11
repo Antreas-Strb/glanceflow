@@ -486,8 +486,8 @@ function commandPieces(command: string): string[] {
 
 // The pieces of a command that run gh: pieces at the top level, and pieces of the quoted command string of
 // bash -c, sh -c or zsh -c. Text inside other quotes, like a commit message, is never a piece of its own.
-// shortcut: reads the command as text; gh started any other way is not detected, and a heredoc line that
-// starts with gh pr merge counts as a merge (refused, never allowed by mistake).
+// shortcut: reads the command as text; gh reached through a variable, an alias, a script file or $(…) is not
+// detected, and a heredoc line that starts with gh pr merge counts as a merge (refused, never allowed by mistake).
 const WRAPPED = /^\s*(?:ba|z)?sh\s+-c\s+(["'])([\s\S]*)\1\s*$/
 const ghPieces = (command: string): string[] =>
   commandPieces(command).flatMap(piece => {
@@ -495,7 +495,21 @@ const ghPieces = (command: string): string[] =>
     return wrapped ? ghPieces(wrapped[2]) : [piece]
   })
 const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
-const API_MERGE = /^\s*gh\s+api\b.*(?:pulls\/[^/\s]+\/merge\b|mergePullRequest)/
+const MERGE_ROUTE = /pulls\/[^/\s]+\/merge\b|mergePullRequest/
+const API_MERGE = new RegExp(`^\\s*gh\\s+api\\b.*(?:${MERGE_ROUTE.source})`)
+
+// A merge run through a wrapper instead of on its own: (…), { …; }, !, env, command, sudo, exec, time, xargs, VAR=x,
+// a path to gh, or eval and sh -c after any of those. Fails closed: gh pr merge outside quotes anywhere in the piece
+// counts, and so does the quoted text that eval or sh -c runs. Text inside other quotes, like a commit message, does not.
+const QUOTED = /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/g
+const RUNS_QUOTED = /(?:^|[^\w-])(?:(?:ba|z)?sh\s+-\w*c|eval)\b/
+const GH_MERGE = /(?:^|[^\w-])gh\s+pr\s+merge\b/
+const GH_API = /(?:^|[^\w-])gh\s+api\b/
+const wrappedMerge = (piece: string) => {
+  const outside = piece.replace(QUOTED, '""')
+  const text = RUNS_QUOTED.test(outside) ? piece : outside
+  return GH_MERGE.test(text) || (GH_API.test(text) && MERGE_ROUTE.test(piece))
+}
 
 /** Whether a shell command runs `gh pr merge`, as the Ship it guard reads it; text that only mentions it does not. */
 export const runsPrMerge = (command: string) => ghPieces(command).some(piece => PR_MERGE.test(piece))
@@ -510,7 +524,15 @@ export function unsafeMerge(command: string, approvedSha: string | null): string
     if (API_MERGE.test(part)) {
       return 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
     }
-    if (!PR_MERGE.test(part)) continue
+    if (!PR_MERGE.test(part)) {
+      if (wrappedMerge(part)) {
+        return (
+          'Ship it merges only with gh pr merge run directly, never through (…), !, env, command, sudo, exec, eval, ' +
+          'a path or another wrapper. Run gh pr merge --squash --delete-branch --match-head-commit <approved SHA> on its own.'
+        )
+      }
+      continue
+    }
     if (/(?<![\w-])--(admin|auto)\b/.test(part)) {
       return 'Ship it never merges with --admin or --auto. Leave the pull request open and tell the person why it cannot merge.'
     }
