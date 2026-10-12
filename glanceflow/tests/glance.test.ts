@@ -1961,6 +1961,51 @@ test('unsafeMerge lets a merge through only at the approved head commit, never w
   expect(unsafeMerge(`bash -c "${mergeAt(SHA)}"`, SHA)).toBeNull()
 })
 
+// gh api calls that merge, or schedule a merge, without gh pr merge: auto-merge, the merge queue and branch merges.
+const API_MERGES = [
+  "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+  "gh api graphql -f query='mutation { enqueuePullRequest(input: {}) { clientMutationId } }'",
+  "gh api graphql -f query='mutation { mergeBranch(input: {}) { clientMutationId } }'",
+  'gh api -X POST repos/me/site/merges -f base=master -f head=fix',
+  'gh api --method POST /repos/{owner}/{repo}/merges -f base=master -f head=fix',
+]
+
+test('unsafeMerge refuses gh api auto-merge, merge-queue and branch-merge routes, bare or wrapped, approved or not', () => {
+  for (const command of API_MERGES) {
+    for (const wrapped of [
+      command,
+      `(${command})`,
+      `env ${command}`,
+      `command ${command}`,
+      `sudo ${command}`,
+      `exec ${command}`,
+      `time ${command}`,
+      `GH_REPO=me/site ${command}`,
+      `{ ${command}; }`,
+      `/usr/local/bin/${command}`,
+      `eval "${command}"`,
+      `bash -c "${command}"`,
+      `sudo bash -c "${command}"`,
+    ]) {
+      expect(runsPrMerge(wrapped)).toBe(false)
+      expect(unsafeMerge(wrapped, null)).not.toBeNull()
+      expect(unsafeMerge(wrapped, SHA)).not.toBeNull()
+    }
+    expect(unsafeMerge(command, SHA)).toContain('never through gh api')
+  }
+
+  for (const command of [
+    "gh api graphql -f query='mutation { disablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='query { repository(owner: \"me\", name: \"site\") { pullRequest(number: 12) { mergeable autoMergeRequest { enabledAt } } } }'",
+    'gh api repos/me/site/pulls/12',
+    'gh api repos/me/site/contents/docs/merges.md',
+    'git commit -m "refuse enablePullRequestAutoMerge and repos/o/r/merges"',
+  ]) {
+    expect(unsafeMerge(command, null)).toBeNull()
+    expect(unsafeMerge(command, SHA)).toBeNull()
+  }
+})
+
 // gh pr merge, or a gh api merge route, run through a shell wrapper instead of on its own.
 const WRAPPED_MERGES = [
   `(${mergeAt(SHA)})`,
@@ -2223,15 +2268,21 @@ test('the merge guard covers helpers during Ship it and leaves merges alone outs
   await finish($)
   const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'Bash', command, ...extra })).deny
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
+  for (const command of API_MERGES) expect(await tries(command)).toBeUndefined()
 
   await pressShip($)
   expect(shipped.sent).toHaveLength(1)
   expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
   expect(await tries('gh pr merge 12 --squash', { agentId: 'a1' })).toContain('Approve merge')
+  for (const command of API_MERGES) {
+    expect(await tries(command)).toContain('never through gh api')
+    expect(await tries(command, { agentId: 'a1' })).toContain('never through gh api')
+  }
   expect(await tries('git status')).toBeUndefined()
 
   await $.command.run({ command: 'glanceflow', args: 'off' } as never)
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
+  for (const command of API_MERGES) expect(await tries(command)).toBeUndefined()
 })
 
 test("a timer left from an earlier press never cancels a later one, and only one button waits for its second press", async ($, on) => {

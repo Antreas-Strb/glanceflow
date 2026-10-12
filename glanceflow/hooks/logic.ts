@@ -495,7 +495,9 @@ const ghPieces = (command: string): string[] =>
     return wrapped ? ghPieces(wrapped[2]) : [piece]
   })
 const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
-const MERGE_ROUTE = /pulls\/[^/\s]+\/merge\b|mergePullRequest/
+// gh api routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
+const MERGE_ROUTE =
+  /pulls\/[^/\s]+\/merge\b|repos\/[^/\s]+\/[^/\s]+\/merges\b|mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch/
 const API_MERGE = new RegExp(`^\\s*gh\\s+api\\b.*(?:${MERGE_ROUTE.source})`)
 
 // A merge run through a wrapper instead of on its own: (…), { …; }, !, env, command, sudo, exec, time, xargs, VAR=x,
