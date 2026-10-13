@@ -3917,3 +3917,10 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
 })
+
+// Disposable: ruleset verification for #18. Never merged.
+describe('ruleset verification #18', () => {
+  test('fails on purpose', () => {
+    expect(1).toBe(2)
+  })
+})
