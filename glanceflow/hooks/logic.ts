@@ -519,7 +519,7 @@ const wrappedMerge = (piece: string) => {
 // shortcut: reads the command as text; curl or wget reached through a variable, an alias, a script, an interpreter, "$(…)"
 // in double quotes or another wrapper is not detected, and a heredoc line that starts with curl or wget counts as running it.
 const HTTP_CLIENT =
-  /(?:^|\$\(|`)(?:\s|[({!]|\w+=\S*\s|(?:env|command|sudo|exec|time|xargs|if|then|else|elif|do|while|until)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s)*(?:\S*\/)?\\?(?:curl|wget)(?![\w.-])/
+  /(?:^|\$\(|`)(?:\s|[({!]|\w+=\S*\s|(?:env|command|sudo|exec|eval|time|xargs|if|then|else|elif|do|while|until)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s)*(?:\S*\/)?\\?(?:curl|wget)(?![\w.-])/
 const runsHttpClient = (command: string): boolean =>
   commandPieces(command.replace(/\\\r?\n/g, ' ')).some(piece => {
     const outside = piece.replace(QUOTED, '""')
