@@ -516,6 +516,17 @@ const wrappedMerge = (piece: string) => {
 /** Whether a shell command runs `gh pr merge`, as the Ship it guard reads it; text that only mentions it does not. */
 export const runsPrMerge = (command: string) => ghPieces(command).some(piece => PR_MERGE.test(piece))
 
+// MCP actions that merge a pull request, turn on auto-merge or add it to a merge queue, lowercased without _ and -.
+// shortcut: an exact closed list, so a merge tool by another name passes; add names seen in a supported server.
+const MCP_MERGE_ACTIONS = new Set(['mergepullrequest', 'enableautomerge', 'enablepullrequestautomerge', 'enqueuepullrequest'])
+
+/** Whether a tool is an MCP action that merges a pull request or schedules its merge; the server's name is never read. */
+export function isMcpMergeAction(tool: string): boolean {
+  const at = tool.lastIndexOf('__')
+  // The action follows the last __; a name with no __ after mcp__ has no action, only a server.
+  return tool.startsWith('mcp__') && at > 3 && MCP_MERGE_ACTIONS.has(tool.slice(at + 2).toLowerCase().replace(/[_-]/g, ''))
+}
+
 /**
  * Why a shell command may not run during Ship it, or null when it may. Every `gh pr merge` it runs, wrapped in
  * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto, and is
