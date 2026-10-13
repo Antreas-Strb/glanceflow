@@ -2062,6 +2062,103 @@ test('unsafeMerge refuses an approved merge that shares its command with anythin
   expect(unsafeMerge(`${mergeAt(SHA)}; true`, null)).toContain('Approve merge')
 })
 
+// curl and wget calls to the REST pull and branch merges and the four GraphQL merge mutations.
+const HTTP_MERGES = [
+  'curl -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  'wget --method=PUT -O- https://api.github.com/repos/me/site/pulls/12/merge',
+  `curl -X POST https://api.github.com/repos/me/site/merges -d '{"base":"master","head":"fix"}'`,
+  `wget --method=POST --body-data='{"base":"master","head":"fix"}' https://api.github.com/repos/me/site/merges`,
+  ...['mergePullRequest', 'enablePullRequestAutoMerge', 'enqueuePullRequest', 'mergeBranch'].flatMap(mutation => [
+    `curl -X POST -d '{"query":"mutation { ${mutation}(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+    `wget --post-data='{"query":"mutation { ${mutation}(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+  ]),
+]
+const HTTP_REFUSAL = 'Ship it merges only with gh pr merge --match-head-commit, never through curl or wget. Leave the pull request open.'
+
+test('unsafeMerge refuses curl and wget merge calls, bare, wrapped, continued, in a heredoc or through a literal variable', () => {
+  for (const command of HTTP_MERGES) {
+    for (const wrapped of [
+      command,
+      `(${command})`,
+      `{ ${command}; }`,
+      `! ${command}`,
+      `env ${command}`,
+      `env -i ${command}`,
+      `command ${command}`,
+      `sudo ${command}`,
+      `sudo -u me ${command}`,
+      `exec ${command}`,
+      `time ${command}`,
+      `GH_TOKEN=x ${command}`,
+      `/usr/bin/${command}`,
+      `\\${command}`,
+      `cd site && ${command}`,
+      `git status; ${command}`,
+      `echo ok | xargs ${command}`,
+      `if ${command}; then echo ok; fi`,
+      `for i in 1; do ${command}; done`,
+      `R=$(${command})`,
+      `R=\`${command}\``,
+      `eval ${command}`,
+      `eval ${JSON.stringify(command)}`,
+      `bash -c ${JSON.stringify(command)}`,
+      `bash -lc ${JSON.stringify(command)}`,
+      `sh -c ${JSON.stringify(command)}`,
+      `zsh -c ${JSON.stringify(command)}`,
+      `sudo bash -c ${JSON.stringify(command)}`,
+    ]) {
+      expect(runsPrMerge(wrapped)).toBe(false)
+      expect(unsafeMerge(wrapped, null)).toBe(HTTP_REFUSAL)
+      expect(unsafeMerge(wrapped, SHA)).toBe(HTTP_REFUSAL)
+    }
+  }
+  expect(unsafeMerge("bash -c 'curl -X PUT https://api.github.com/repos/me/site/pulls/12/merge'", SHA)).toBe(HTTP_REFUSAL)
+
+  for (const command of [
+    // Continued lines and several lines.
+    'curl -X PUT \\\n  https://api.github.com/repos/me/site/pulls/12/merge',
+    'curl \\\n  -X PUT \\\n  https://api.github.com/repos/me/site/pulls/12/merge',
+    'wget \\\n  --method=PUT https://api.github.com/repos/me/site/pulls/12/merge',
+    'GH_TOKEN=x \\\n  curl -X POST https://api.github.com/repos/me/site/merges',
+    'git fetch\ncurl -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+    // A heredoc body in the same command.
+    `curl -X POST https://api.github.com/graphql --data-binary @- <<'EOF'\n{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}\nEOF`,
+    `wget --post-file=/dev/stdin -O- https://api.github.com/graphql <<EOF\n{"query":"mutation { enqueuePullRequest(input: {}) { clientMutationId } }"}\nEOF`,
+    // A literal route kept in a variable.
+    'URL=https://api.github.com/repos/me/site/pulls/12/merge; curl -X PUT "$URL"',
+    'URL=https://api.github.com/repos/me/site/merges curl -X POST "$URL"',
+    'export URL=https://api.github.com/repos/me/site/pulls/12/merge && wget --method=PUT "$URL"',
+    `Q='mutation { mergeBranch(input: {}) { clientMutationId } }'\ncurl -d "{\\"query\\":\\"$Q\\"}" https://api.github.com/graphql`,
+  ]) {
+    expect(unsafeMerge(command, null)).toBe(HTTP_REFUSAL)
+    expect(unsafeMerge(command, SHA)).toBe(HTTP_REFUSAL)
+  }
+
+  for (const command of [
+    'curl -s https://api.github.com/repos/me/site/pulls/12',
+    'wget -qO- https://api.github.com/repos/me/site/pulls/12',
+    'curl -s https://api.github.com/repos/me/site/pulls/12/merged',
+    'curl -s https://api.github.com/repos/me/site/contents/docs/merges.md',
+    'wget -qO- https://api.github.com/repos/me/site/contents/docs/merges.md',
+    `curl -d '{"query":"query { repository(owner: \\"me\\", name: \\"site\\") { pullRequest(number: 12) { mergeable autoMergeRequest { enabledAt } } } }"}' https://api.github.com/graphql`,
+    `curl -d '{"query":"mutation { disablePullRequestAutoMerge(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+    'curlie -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+    'echo curl https://api.github.com/repos/o/r/pulls/12/merge',
+    'echo wget --method=PUT https://api.github.com/repos/o/r/merges',
+    'echo eval curl https://api.github.com/repos/o/r/pulls/12/merge',
+    'grep mergePullRequest file.txt',
+    'grep -rn "curl -X PUT https://api.github.com/repos/o/r/pulls/12/merge" docs',
+    'echo "curl -X PUT https://api.github.com/repos/o/r/pulls/12/merge"',
+    "echo 'wget --post-data=mergePullRequest https://api.github.com/graphql'",
+    'git commit -m "Refuse curl -X PUT https://api.github.com/repos/o/r/pulls/12/merge"',
+    "git commit -m 'block wget calls to repos/o/r/merges'",
+    'bash -c "echo curl https://api.github.com/repos/o/r/pulls/12/merge"',
+  ]) {
+    expect(unsafeMerge(command, null)).toBeNull()
+    expect(unsafeMerge(command, SHA)).toBeNull()
+  }
+})
+
 test('askedMergeSha reads the full head commit from the approval line', () => {
   expect(askedMergeSha(`Checks passed.\nReply exactly: Approve merge ${SHA}\nAnything else leaves the pull request open.`)).toBe(SHA)
   expect(askedMergeSha(`Reply exactly: \`Approve merge ${SHA}\``)).toBe(SHA)
@@ -2283,6 +2380,53 @@ test('the merge guard covers helpers during Ship it and leaves merges alone outs
   await $.command.run({ command: 'glanceflow', args: 'off' } as never)
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
   for (const command of API_MERGES) expect(await tries(command)).toBeUndefined()
+})
+
+test('Ship it refuses curl and wget merges from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'Bash', command, ...extra })).deny
+  for (const command of HTTP_MERGES) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of HTTP_MERGES) {
+    expect(await tries(command)).toBe(HTTP_REFUSAL)
+    expect(await tries(command, { agentId: 'a1' })).toBe(HTTP_REFUSAL)
+  }
+  for (const command of ['curl -s https://api.github.com/repos/me/site/pulls/12', 'echo curl https://api.github.com/repos/o/r/pulls/12/merge']) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  // Refusing them does not end Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of HTTP_MERGES) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused curl or wget merge leaves the approval and Ship it as they were, so the approved gh pr merge still runs', async ($, on) => {
+  const { ask, tries } = await shipping($, on)
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of HTTP_MERGES) {
+    expect(await tries(command)).toBe(HTTP_REFUSAL)
+    expect(await tries(command, { agentId: 'a1' })).toBe(HTTP_REFUSAL)
+  }
+  // Still guarded, nothing recorded as merged, and the approval is unused.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  expect(await tries(mergeAt(OTHER_SHA))).toContain('Approve merge')
+  expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
+  // That merge worked and ended Ship it.
+  expect(await tries(HTTP_MERGES[0])).toBeUndefined()
 })
 
 // MCP tools that merge a pull request, turn on auto-merge or add it to a merge queue, under two server prefixes.
