@@ -495,7 +495,7 @@ const ghPieces = (command: string): string[] =>
     return wrapped ? ghPieces(wrapped[2]) : [piece]
   })
 const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
-// gh api routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
+// gh api, curl and wget routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
 const MERGE_ROUTE =
   /pulls\/[^/\s]+\/merge\b|repos\/[^/\s]+\/[^/\s]+\/merges\b|mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch/
 const API_MERGE = new RegExp(`^\\s*gh\\s+api\\b.*(?:${MERGE_ROUTE.source})`)
@@ -512,6 +512,20 @@ const wrappedMerge = (piece: string) => {
   const text = RUNS_QUOTED.test(outside) ? piece : outside
   return GH_MERGE.test(text) || (GH_API.test(text) && MERGE_ROUTE.test(piece))
 }
+
+// curl or wget where a command starts: at the start of a piece, after $( or `, after if, then, else, elif, do, while,
+// until or the wrappers above, all outside quotes; the quoted text that eval or sh -c runs is read the same way. Text
+// that only mentions them, like echo curl or grep wget, does not run them.
+// shortcut: reads the command as text; curl or wget reached through a variable, an alias, a script, an interpreter, "$(…)"
+// in double quotes or another wrapper is not detected, and a heredoc line that starts with curl or wget counts as running it.
+const HTTP_CLIENT =
+  /(?:^|\$\(|`)(?:\s|[({!]|\w+=\S*\s|(?:env|command|sudo|exec|time|xargs|if|then|else|elif|do|while|until)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s)*(?:\S*\/)?\\?(?:curl|wget)(?![\w.-])/
+const runsHttpClient = (command: string): boolean =>
+  commandPieces(command.replace(/\\\r?\n/g, ' ')).some(piece => {
+    const outside = piece.replace(QUOTED, '""')
+    if (HTTP_CLIENT.test(outside)) return true
+    return RUNS_QUOTED.test(outside) && [...piece.matchAll(QUOTED)].some(([quoted]) => runsHttpClient(quoted.slice(1, -1)))
+  })
 
 /** Whether a shell command runs `gh pr merge`, as the Ship it guard reads it; text that only mentions it does not. */
 export const runsPrMerge = (command: string) => ghPieces(command).some(piece => PR_MERGE.test(piece))
@@ -530,9 +544,13 @@ export function isMcpMergeAction(tool: string): boolean {
 /**
  * Why a shell command may not run during Ship it, or null when it may. Every `gh pr merge` it runs, wrapped in
  * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto, and is
- * the whole command, so a failed merge is never read as a success; merging through `gh api` is never allowed.
+ * the whole command, so a failed merge is never read as a success; merging through `gh api`, curl or wget is never allowed.
  */
 export function unsafeMerge(command: string, approvedSha: string | null): string | null {
+  // The route may sit anywhere in the written command: a heredoc body, a continued line or a literal variable.
+  if (MERGE_ROUTE.test(command) && runsHttpClient(command)) {
+    return 'Ship it merges only with gh pr merge --match-head-commit, never through curl or wget. Leave the pull request open.'
+  }
   for (const part of ghPieces(command)) {
     if (API_MERGE.test(part)) {
       return 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
