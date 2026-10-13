@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, otherChats, otherChatsWords, runsPrMerge, staleResumeKeys, toggled, unsafeMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPrMerge, staleResumeKeys, toggled, unsafeMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -2283,6 +2283,89 @@ test('the merge guard covers helpers during Ship it and leaves merges alone outs
   await $.command.run({ command: 'glanceflow', args: 'off' } as never)
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
   for (const command of API_MERGES) expect(await tries(command)).toBeUndefined()
+})
+
+// MCP tools that merge a pull request, turn on auto-merge or add it to a merge queue, under two server prefixes.
+const MCP_MERGES = ['mcp__github__', 'mcp__plugin_engineering_github__'].flatMap(server =>
+  [
+    'merge_pull_request',
+    'mergePullRequest',
+    'merge-pull-request',
+    'enable_auto_merge',
+    'enable_pull_request_auto_merge',
+    'enqueue_pull_request',
+  ].map(action => server + action),
+)
+// Read-only or unrelated MCP tools, some with "merge" in the name, and a server named like a merge action.
+const MCP_OTHERS = [
+  'mcp__github__get_pull_request',
+  'mcp__github__list_pull_requests',
+  'mcp__github__pull_request_read',
+  'mcp__github__get_merge_status',
+  'mcp__github__disable_auto_merge',
+  'mcp__mnemo__mem_merge_tags',
+  'mcp__claude_ai_Supabase__merge_branch',
+  'mcp__merge_pull_request__get_pull_request',
+]
+
+test('isMcpMergeAction matches only the exact merge, auto-merge and merge-queue actions of an MCP tool', () => {
+  for (const tool of MCP_MERGES) expect(isMcpMergeAction(tool)).toBe(true)
+  for (const tool of [...MCP_OTHERS, PLAN, PROGRESS, 'merge_pull_request', 'Bash', 'mcp__merge_pull_request']) {
+    expect(isMcpMergeAction(tool)).toBe(false)
+  }
+})
+
+test('Ship it refuses MCP merge actions from Claude and helpers alike, and lets other MCP tools run', async ($, on) => {
+  const { tries } = await shipping($, on)
+  const calls = async (tool: string, extra: object = {}) => (await callTool($, { tool, ...extra })).deny
+  for (const tool of MCP_MERGES) {
+    expect(await calls(tool)).toContain('never through an MCP tool')
+    expect(await calls(tool, { agentId: 'a1' })).toContain('never through an MCP tool')
+  }
+  for (const tool of MCP_OTHERS) {
+    expect(await calls(tool)).toBeUndefined()
+    expect(await calls(tool, { agentId: 'a1' })).toBeUndefined()
+  }
+  expect(await calls(PROGRESS, { task: 'Wait for checks', percent: 100 })).toBeUndefined()
+  expect(await calls(PLAN, { steps: ['Merge it', 'Report back'] })).toBeUndefined()
+  // Refusing them does not end Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+})
+
+test('a refused MCP merge leaves the approval for the gh pr merge it names, and once that merge ends Ship it MCP merges are left alone', async ($, on) => {
+  const { ask, tries } = await shipping($, on)
+  const calls = async (tool: string, extra: object = {}) => (await callTool($, { tool, ...extra })).deny
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const tool of MCP_MERGES) expect(await calls(tool)).toContain('never through an MCP tool')
+  expect(await tries(mergeAt(SHA))).toBeUndefined()
+
+  for (const tool of MCP_MERGES) {
+    expect(await calls(tool)).toBeUndefined()
+    expect(await calls(tool, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('MCP merge actions are left alone before Ship it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const calls = async (tool: string, extra: object = {}) => (await callTool($, { tool, ...extra })).deny
+  for (const tool of MCP_MERGES) {
+    expect(await calls(tool)).toBeUndefined()
+    expect(await calls(tool, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const tool of MCP_MERGES) expect(await calls(tool)).toContain('never through an MCP tool')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const tool of MCP_MERGES) {
+    expect(await calls(tool)).toBeUndefined()
+    expect(await calls(tool, { agentId: 'a1' })).toBeUndefined()
+  }
 })
 
 test("a timer left from an earlier press never cancels a later one, and only one button waits for its second press", async ($, on) => {

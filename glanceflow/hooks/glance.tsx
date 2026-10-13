@@ -62,6 +62,7 @@ import {
   isContinueWords,
   isFinished,
   isLatinText,
+  isMcpMergeAction,
   isStartWords,
   jobCost,
   leftLabel,
@@ -1742,6 +1743,13 @@ export function registerGlance(on: On): void {
 
     // Ship it merges only the head commit the person approved, never past branch protection; helpers too.
     let isMerging = false
+    if (isMcpMergeAction(tool) && isShipping && (await read($, enabledAtom))) {
+      return {
+        deny:
+          'Ship it merges only with gh pr merge --squash --delete-branch --match-head-commit <approved SHA> run on its ' +
+          'own, never through an MCP tool. Leave the pull request open.',
+      }
+    }
     if (tool === 'Bash' && isShipping && (await read($, enabledAtom))) {
       const command = String((e as unknown as { command?: unknown }).command ?? '')
       const denied = unsafeMerge(command, approvedSha)
