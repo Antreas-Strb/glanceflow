@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPrMerge, staleResumeKeys, toggled, unsafeMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -2596,6 +2596,185 @@ test('MCP merge actions are left alone before Ship it and with GlanceFlow off', 
     expect(await calls(tool)).toBeUndefined()
     expect(await calls(tool, { agentId: 'a1' })).toBeUndefined()
   }
+})
+
+const PS_REFUSAL = 'PowerShell may merge only with gh pr merge'
+// PowerShell commands Ship it refuses, approved or not: gh merges in any case, path or wrapper, backtick-escaped,
+// and merge routes through gh api, the HTTP cmdlets and their aliases, curl.exe or wget.exe.
+const PS_MERGES = [
+  'gh pr merge 12 --squash',
+  'GH PR MERGE 12 --squash',
+  'Gh Pr Merge 12 --squash',
+  'gh.exe pr merge 12 --squash',
+  "& 'C:\\Program Files\\GitHub CLI\\gh.exe' pr merge 12 --squash",
+  'g`h pr me`rge 12 --squash',
+  'gh api -X PUT repos/me/site/pulls/12/merge',
+  'GH API -X PUT repos/me/site/pulls/12/merge',
+  "gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'",
+  "gh api graphql -f query='mutation { enqueuePullRequest(input: {}) { clientMutationId } }'",
+  "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+  'Invoke-RestMethod -Method Put -Uri https://api.github.com/repos/me/site/pulls/12/merge',
+  'INVOKE-RESTMETHOD -Method Put -Uri https://api.github.com/repos/me/site/pulls/12/merge',
+  'irm -Method Put https://api.github.com/repos/me/site/pulls/12/merge',
+  'Invoke-WebRequest -Method Put -Uri https://api.github.com/repos/me/site/pulls/12/merge',
+  'iwr -Method Put https://api.github.com/repos/me/site/pulls/12/merge',
+  'Invoke-`RestMethod -Method Put https://api.github.com/repos/me/site/pulls/12/mer`ge',
+  'curl -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  'curl.exe -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  'CURL.EXE -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  'wget.exe --method=PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  "Invoke-RestMethod -Method Post https://api.github.com/graphql -Body '{\"query\":\"mutation { mergePullRequest }\"}'",
+  "$u = 'https://api.github.com/repos/me/site/pulls/12/merge'; irm -Method Put $u",
+  'pwsh -Command "gh pr merge 12 --squash"',
+  "Start-Process gh -ArgumentList 'pr merge 12 --squash'",
+  'cmd /c gh pr merge 12 --squash',
+  "Invoke-Expression 'gh pr merge 12 --squash'",
+  'Write-Output ok; gh pr merge 12 --squash',
+]
+// The sanctioned form gone wrong: refused even at the approved head commit.
+const PS_ALMOST = [
+  `${mergeAt(SHA)} --admin`,
+  `${mergeAt(SHA)} --auto`,
+  `gh pr merge 12 --admin --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh pr merge --auto --squash --delete-branch --match-head-commit ${SHA}`,
+  `${mergeAt(SHA)}; Write-Output done`,
+  `${mergeAt(SHA)} | Out-Null`,
+  `${mergeAt(SHA)} && Write-Output done`,
+  `${mergeAt(SHA)} || Write-Output failed`,
+  `${mergeAt(SHA)}\nWrite-Output done`,
+  `Write-Output start\n${mergeAt(SHA)}`,
+  `gh pr merge\n12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `(${mergeAt(SHA)})`,
+  `& ${mergeAt(SHA)}`,
+  `$(${mergeAt(SHA)})`,
+  `gh pr merge #12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `${mergeAt(SHA)} # done`,
+  `gh pr merge 12 --squash --delete-branch --match-head-commit \`${SHA}`,
+  'g`h pr merge 12 --squash --delete-branch --match-head-commit ' + SHA,
+  `GH pr merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh.exe pr merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `pwsh -Command "${mergeAt(SHA)}"`,
+  `gh pr merge 12 --squash --delete-branch --match-head-commit ${SHA.toUpperCase()}`,
+]
+// PowerShell commands Ship it itself runs, and others with no merge route: left alone during Ship it.
+const PS_HARMLESS = [
+  'gh pr view 12 --json headRefOid',
+  'gh pr checks 12 --watch',
+  'gh pr create --fill',
+  'gh pr create --title "Fix the footer" --body "Adds the missing links"',
+  'git merge --ff-only origin/master',
+  'Write-Output "merge"',
+  'irm https://api.github.com/repos/me/site/pulls/12',
+  'curl.exe -s https://api.github.com/repos/me/site/pulls/12',
+  'Get-Content README.md',
+]
+// Accepted false positive: during Ship it, merge in harmless argument text next to gh is refused in PowerShell, with no
+// gh pr create exception; Bash reads the same command as it always has.
+const PS_FALSE_POSITIVE = 'gh pr create --title "Guard merge routes" --body "Docs only"'
+
+test('unsafePowerShellMerge allows only the exact sanctioned merge at the approved head commit', () => {
+  for (const command of [
+    mergeAt(SHA),
+    `  ${mergeAt(SHA)}\n`,
+    `gh pr merge --squash --delete-branch --match-head-commit ${SHA}`,
+    `gh pr merge https://github.com/me/site/pull/12 --squash --delete-branch --match-head-commit ${SHA}`,
+  ]) {
+    expect(unsafePowerShellMerge(command, SHA)).toBeNull()
+    expect(runsPowerShellMerge(command)).toBe(true)
+    expect(unsafePowerShellMerge(command, null)).toContain('Approve merge')
+    expect(unsafePowerShellMerge(command, OTHER_SHA)).toContain('Approve merge')
+  }
+  for (const command of [...PS_ALMOST, ...PS_MERGES]) {
+    expect(runsPowerShellMerge(command)).toBe(false)
+    expect(unsafePowerShellMerge(command, SHA)).toContain(PS_REFUSAL)
+    expect(unsafePowerShellMerge(command, null)).not.toBeNull()
+  }
+  for (const command of PS_HARMLESS) {
+    expect(unsafePowerShellMerge(command, null)).toBeNull()
+    expect(unsafePowerShellMerge(command, SHA)).toBeNull()
+    expect(runsPowerShellMerge(command)).toBe(false)
+  }
+  // The accepted false positive is refused in PowerShell, and Bash still lets it run.
+  expect(unsafePowerShellMerge(PS_FALSE_POSITIVE, SHA)).toContain(PS_REFUSAL)
+  expect(unsafePowerShellMerge(PS_FALSE_POSITIVE, null)).toContain(PS_REFUSAL)
+  expect(unsafeMerge(PS_FALSE_POSITIVE, SHA)).toBeNull()
+  expect(unsafeMerge(PS_FALSE_POSITIVE, null)).toBeNull()
+})
+
+test('Ship it refuses PowerShell merges from Claude and helpers, and leaves PowerShell alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'PowerShell', command, ...extra })).deny
+  for (const command of [...PS_MERGES, PS_FALSE_POSITIVE, mergeAt(SHA)]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of [...PS_MERGES, ...PS_ALMOST, PS_FALSE_POSITIVE]) {
+    expect(await tries(command)).toContain(PS_REFUSAL)
+    expect(await tries(command, { agentId: 'a1' })).toContain(PS_REFUSAL)
+  }
+  // Not approved yet: the sanctioned merge asks for the approval, from Claude and helpers alike.
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+  expect(await tries(mergeAt(SHA), { agentId: 'a1' })).toContain('Approve merge')
+  for (const command of PS_HARMLESS) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  // Refusing them does not end Ship it, for PowerShell or Bash.
+  expect(await tries('gh pr merge 12 --squash')).toContain(PS_REFUSAL)
+  expect((await callTool($, { tool: 'Bash', command: 'gh pr merge 12 --squash' })).deny).toContain('Approve merge')
+  // Bash keeps its own reading: the PowerShell false positive runs there.
+  expect((await callTool($, { tool: 'Bash', command: PS_FALSE_POSITIVE })).deny).toBeUndefined()
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of [...PS_MERGES, PS_FALSE_POSITIVE]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused PowerShell merge leaves the approval; the sanctioned PowerShell merge uses it once and ends Ship it', async ($, on) => {
+  const { ask, tries } = await shipping($, on)
+  const ps = async (command: string, extra: object = {}) => tries(command, { tool: 'PowerShell', ...extra })
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of [...PS_MERGES, ...PS_ALMOST, PS_FALSE_POSITIVE]) {
+    expect(await ps(command)).toContain(PS_REFUSAL)
+    expect(await ps(command, { agentId: 'a1' })).toContain(PS_REFUSAL)
+  }
+  expect(await ps(mergeAt(OTHER_SHA))).toContain('Approve merge')
+  expect(await ps(mergeAt(OTHER_SHA), { agentId: 'a1' })).toContain('Approve merge')
+  for (const command of PS_HARMLESS) expect(await ps(command)).toBeUndefined()
+  // Still guarded, and the approval is unused.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  expect(await ps(mergeAt(SHA))).toBeUndefined()
+
+  // That merge worked and ended Ship it: PowerShell is back to normal.
+  for (const command of [...PS_MERGES, PS_FALSE_POSITIVE]) {
+    expect(await ps(command)).toBeUndefined()
+    expect(await ps(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
+})
+
+test('a helper PowerShell merge uses the approval once, like Claude: a failed one needs a fresh approval', async ($, on) => {
+  const { ask, tries, failMerges } = await shipping($, on)
+  const ps = async (command: string, extra: object = {}) => tries(command, { tool: 'PowerShell', ...extra })
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  failMerges(true)
+  expect(await ps(mergeAt(SHA), { agentId: 'a1' })).toBeUndefined()
+  // One approval, one merge attempt, whichever tool or caller tries next.
+  expect(await ps(mergeAt(SHA), { agentId: 'a1' })).toContain('Approve merge')
+  expect(await ps(mergeAt(SHA))).toContain('Approve merge')
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+  expect(await ps('gh pr merge 12 --squash')).toContain(PS_REFUSAL)
 })
 
 test("a timer left from an earlier press never cancels a later one, and only one button waits for its second press", async ($, on) => {

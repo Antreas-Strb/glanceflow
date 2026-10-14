@@ -543,6 +543,11 @@ export function isMcpMergeAction(tool: string): boolean {
   return tool.startsWith('mcp__') && at > 3 && MCP_MERGE_ACTIONS.has(tool.slice(at + 2).toLowerCase().replace(/[_-]/g, ''))
 }
 
+const APPROVED_ONLY =
+  'Ship it merges only the head commit the person approved. End your turn by showing the pull request link, the ' +
+  'checks and the full head SHA, then "Reply exactly: Approve merge <full SHA>", and wait for exactly that reply. ' +
+  'Then run gh pr merge --squash --delete-branch --match-head-commit <that full SHA>.'
+
 /**
  * Why a shell command may not run during Ship it, or null when it may. Every `gh pr merge` it runs, wrapped in
  * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto, and is
@@ -573,17 +578,44 @@ export function unsafeMerge(command: string, approvedSha: string | null): string
       return 'Ship it never merges with --admin or --auto. Leave the pull request open and tell the person why it cannot merge.'
     }
     const shas = [...part.matchAll(/(?<![\w-])--match-head-commit[=\s]+["']?([0-9a-f]{40})\b/g)].map(found => found[1])
-    if (approvedSha === null || shas.length === 0 || shas.some(sha => sha !== approvedSha)) {
-      return (
-        'Ship it merges only the head commit the person approved. End your turn by showing the pull request link, the ' +
-        'checks and the full head SHA, then "Reply exactly: Approve merge <full SHA>", and wait for exactly that reply. ' +
-        'Then run gh pr merge --squash --delete-branch --match-head-commit <that full SHA>.'
-      )
-    }
+    if (approvedSha === null || shas.length === 0 || shas.some(sha => sha !== approvedSha)) return APPROVED_ONLY
     // The tool's exit code is the merge's own only when nothing else runs: `; true`, `|| true` or `| cat` hide a failure.
     if (ghPieces(command.trim()).length > 1) {
       return 'Run the approved gh pr merge on its own, with nothing before or after it, so its exit code shows whether it merged.'
     }
+  }
+  return null
+}
+
+// PowerShell's only merge: the whole command, one line, words apart by spaces, and a PR argument with no PowerShell
+// metacharacter (# starts a comment); none of --admin, --auto, chaining, a wrapper or a backtick fits it.
+const PS_SANCTIONED = /^gh[ \t]+pr[ \t]+merge(?:[ \t]+[\w./:][\w./:-]*)?[ \t]+--squash[ \t]+--delete-branch[ \t]+--match-head-commit[ \t]+([0-9a-f]{40})$/
+// Fail-closed PowerShell rule, no parser: read with backticks gone and case ignored, merge text (or a merge route) beside
+// gh, the GitHub API or GraphQL, or an HTTP cmdlet or client is refused.
+// Accepted false positive: during Ship it, merge in harmless argument text, like gh pr create --title "…merge…", is
+// refused too, with no gh pr create exception. Bash keeps its own reading.
+// shortcut: reads the command as text; a command built at run time (string joins, variables, -EncodedCommand, a script
+// file) is not seen, and branch protection stays the backstop.
+const PS_MERGE = new RegExp(`merge|${MERGE_ROUTE.source}`, 'i')
+const PS_RUNNER = /(?<![\w-])(?:gh|invoke-restmethod|irm|invoke-webrequest|iwr|curl|wget)(?:\.exe)?(?![\w-])|api\.github\.com|graphql/i
+
+/** Whether a PowerShell command is the sanctioned Ship it merge, as the guard reads it. */
+export const runsPowerShellMerge = (command: string) => PS_SANCTIONED.test(command.trim())
+
+/**
+ * Why a PowerShell command may not run during Ship it, or null when it may: the only merge is the sanctioned
+ * gh pr merge at the approved head commit, and any other command with a merge route is refused.
+ */
+export function unsafePowerShellMerge(command: string, approvedSha: string | null): string | null {
+  const sanctioned = PS_SANCTIONED.exec(command.trim())
+  if (sanctioned) return approvedSha !== null && sanctioned[1] === approvedSha ? null : APPROVED_ONLY
+  const text = command.replace(/`/g, '')
+  if (PS_MERGE.test(text) && PS_RUNNER.test(text)) {
+    return (
+      'In Ship it, PowerShell may merge only with gh pr merge --squash --delete-branch --match-head-commit <approved SHA> ' +
+      'as the whole command; anything else that names a merge beside gh, the GitHub API or an HTTP client is refused, ' +
+      'even in a title. Leave the pull request open.'
+    )
   }
   return null
 }
