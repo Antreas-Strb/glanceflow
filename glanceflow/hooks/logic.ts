@@ -498,7 +498,6 @@ const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
 // gh api, curl and wget routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
 const MERGE_ROUTE =
   /pulls\/[^/\s]+\/merge\b|repos\/[^/\s]+\/[^/\s]+\/merges\b|mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch/
-const API_MERGE = new RegExp(`^\\s*gh\\s+api\\b.*(?:${MERGE_ROUTE.source})`)
 
 // A merge run through a wrapper instead of on its own: (…), { …; }, !, env, command, sudo, exec, time, xargs, VAR=x,
 // a path to gh, or eval and sh -c after any of those. Fails closed: gh pr merge outside quotes anywhere in the piece
@@ -507,11 +506,14 @@ const QUOTED = /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/g
 const RUNS_QUOTED = /(?:^|[^\w-])(?:(?:ba|z)?sh\s+-\w*c|eval)\b/
 const GH_MERGE = /(?:^|[^\w-])gh\s+pr\s+merge\b/
 const GH_API = /(?:^|[^\w-])gh\s+api\b/
-const wrappedMerge = (piece: string) => {
+// The text of a piece that runs: what stands outside quotes, or all of it when eval or sh -c runs its quoted text.
+const runText = (piece: string) => {
   const outside = piece.replace(QUOTED, '""')
-  const text = RUNS_QUOTED.test(outside) ? piece : outside
-  return GH_MERGE.test(text) || (GH_API.test(text) && MERGE_ROUTE.test(piece))
+  return RUNS_QUOTED.test(outside) ? piece : outside
 }
+const wrappedMerge = (piece: string) => GH_MERGE.test(runText(piece))
+// gh api run in any piece, bare or wrapped; text that only mentions it, like echo "gh api", does not run it.
+const runsGhApi = (command: string) => ghPieces(command).some(piece => GH_API.test(runText(piece)))
 
 // curl or wget where a command starts: at the start of a piece, after $( or `, after if, then, else, elif, do, while,
 // until or the wrappers above, all outside quotes; the quoted text that eval or sh -c runs is read the same way. Text
@@ -551,10 +553,13 @@ export function unsafeMerge(command: string, approvedSha: string | null): string
   if (MERGE_ROUTE.test(command) && runsHttpClient(command)) {
     return 'Ship it merges only with gh pr merge --match-head-commit, never through curl or wget. Leave the pull request open.'
   }
+  // Likewise for gh api, so a body it reads from stdin, like gh api graphql --input - <<EOF, is seen.
+  // shortcut: reads the command as text; a body in a file (--input body.json) or made at run time is not seen, and any
+  // gh api run beside a merge route in the text, like a heredoc that only writes one, is refused (never allowed by mistake).
+  if (MERGE_ROUTE.test(command) && runsGhApi(command)) {
+    return 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
+  }
   for (const part of ghPieces(command)) {
-    if (API_MERGE.test(part)) {
-      return 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
-    }
     if (!PR_MERGE.test(part)) {
       if (wrappedMerge(part)) {
         return (

@@ -2159,6 +2159,47 @@ test('unsafeMerge refuses curl and wget merge calls, bare, wrapped, continued, i
   }
 })
 
+const API_REFUSAL = 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
+
+// gh api GraphQL merge mutations whose body gh api reads from stdin: a heredoc, a pipe, or -F query=@-.
+const STDIN_MERGES = ['mergePullRequest', 'enablePullRequestAutoMerge', 'enqueuePullRequest', 'mergeBranch'].flatMap(mutation => {
+  const query = `mutation { ${mutation}(input: {}) { clientMutationId } }`
+  const body = `{"query":"${query}"}`
+  return [
+    `gh api graphql --input - <<EOF\n${body}\nEOF`,
+    `gh api graphql --input - <<'EOF'\n${body}\nEOF`,
+    `echo '${body}' | gh api graphql --input -`,
+    `cat <<EOF | gh api graphql --input -\n${body}\nEOF`,
+    `gh api graphql -F query=@- <<'EOF'\n${query}\nEOF`,
+    `env gh api graphql --input - <<EOF\n${body}\nEOF`,
+  ]
+})
+const STDIN_QUERY = `gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`
+
+test('unsafeMerge refuses gh api GraphQL merge mutations sent through stdin, approved or not, and leaves harmless ones alone', () => {
+  for (const command of STDIN_MERGES) {
+    expect(runsPrMerge(command)).toBe(false)
+    expect(unsafeMerge(command, null)).toBe(API_REFUSAL)
+    expect(unsafeMerge(command, SHA)).toBe(API_REFUSAL)
+  }
+
+  for (const command of [
+    STDIN_QUERY,
+    `gh api graphql -F query=@- <<'EOF'\nquery { repository(owner: "me", name: "site") { pullRequest(number: 12) { mergeable mergeStateStatus autoMergeRequest { enabledAt } } } }\nEOF`,
+    `gh api graphql --input - <<'EOF'\n{"query":"mutation { addComment(input: {subjectId: \\"x\\", body: \\"hi\\"}) { clientMutationId } }"}\nEOF`,
+    `gh api graphql --input - <<'EOF'\n{"query":"mutation { disablePullRequestAutoMerge(input: {}) { clientMutationId } }"}\nEOF`,
+    `echo '{"title":"New title"}' | gh api -X PATCH repos/me/site/pulls/12 --input -`,
+    'gh api repos/me/site/pulls/12 --jq .mergeable',
+    'git commit -m "guard gh api graphql --input - with mergePullRequest"',
+    'echo "gh api graphql --input - mergePullRequest"',
+    'grep -rn "gh api graphql --input -" docs | grep mergePullRequest',
+    `cat > notes.md <<'EOF'\nmergePullRequest\nEOF`,
+  ]) {
+    expect(unsafeMerge(command, null)).toBeNull()
+    expect(unsafeMerge(command, SHA)).toBeNull()
+  }
+})
+
 test('askedMergeSha reads the full head commit from the approval line', () => {
   expect(askedMergeSha(`Checks passed.\nReply exactly: Approve merge ${SHA}\nAnything else leaves the pull request open.`)).toBe(SHA)
   expect(askedMergeSha(`Reply exactly: \`Approve merge ${SHA}\``)).toBe(SHA)
@@ -2427,6 +2468,51 @@ test('a refused curl or wget merge leaves the approval and Ship it as they were,
   expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
   // That merge worked and ended Ship it.
   expect(await tries(HTTP_MERGES[0])).toBeUndefined()
+})
+
+test('Ship it refuses gh api merges sent through stdin from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'Bash', command, ...extra })).deny
+  for (const command of STDIN_MERGES) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of STDIN_MERGES) {
+    expect(await tries(command)).toBe(API_REFUSAL)
+    expect(await tries(command, { agentId: 'a1' })).toBe(API_REFUSAL)
+  }
+  expect(await tries(STDIN_QUERY)).toBeUndefined()
+  expect(await tries(STDIN_QUERY, { agentId: 'a1' })).toBeUndefined()
+  // Refusing them does not end Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of STDIN_MERGES) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused gh api stdin merge leaves the approval and Ship it as they were, so the approved gh pr merge still runs', async ($, on) => {
+  const { ask, tries } = await shipping($, on)
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of STDIN_MERGES) {
+    expect(await tries(command)).toBe(API_REFUSAL)
+    expect(await tries(command, { agentId: 'a1' })).toBe(API_REFUSAL)
+  }
+  // Still guarded, nothing recorded as merged, and the approval is unused.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  expect(await tries(mergeAt(OTHER_SHA))).toContain('Approve merge')
+  expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
+  // That merge worked and ended Ship it.
+  expect(await tries(STDIN_MERGES[0])).toBeUndefined()
 })
 
 // MCP tools that merge a pull request, turn on auto-merge or add it to a merge queue, under two server prefixes.
