@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -2200,6 +2200,237 @@ test('unsafeMerge refuses gh api GraphQL merge mutations sent through stdin, app
   }
 })
 
+// shellPieces reads a command into the words Bash passes on: [command, words of each piece, run-time words].
+const SHELL_WORDS: [string, string[][], string[]][] = [
+  ['gh pr merge 12', [['gh', 'pr', 'merge', '12']], []],
+  ['"gh" pr merge', [['gh', 'pr', 'merge']], []],
+  [`g''h p"r" mer'g'e`, [['gh', 'pr', 'merge']], []],
+  ['gh \\\npr \\\nmerge', [['gh', 'pr', 'merge']], []],
+  ['g\\\nh pr', [['gh', 'pr']], []],
+  ['\\gh pr \\merge', [['gh', 'pr', 'merge']], []],
+  [`gh pr $'\\x6d'erge`, [['gh', 'pr', 'merge']], []],
+  [`gh pr $'\\155'erge`, [['gh', 'pr', 'merge']], []],
+  [`$'a\\tb' $'it\\'s' $'\\\\'`, [['a\tb', "it's", '\\']], []],
+  ['"a\\"b\\\\c\\$d\\`e\\x"', [['a"b\\c$d`e\\x']], []],
+  [`'a\\b' 'it'"'"'s'`, [['a\\b', "it's"]], []],
+  [`--ad''min --match-head-commit=b"bb"`, [['--admin', '--match-head-commit=bbb']], []],
+  ['"a b"c d""e "" \'\'', [['a bc', 'de', '', '']], []],
+  ['gh api repos/{owner}/{repo}/pulls x=$ \\$X \'$X\'', [['gh', 'api', 'repos/{owner}/{repo}/pulls', 'x=$', '$X', '$X']], []],
+  ['a;b && c|d || e & f\ng', [['a'], ['b'], ['c'], ['d'], ['e'], ['f'], ['g']], []],
+  ['"a;b" \'c|d\' e\\;f', [['a;b', 'c|d', 'e;f']], []],
+  ['(gh pr) >out <in', [['(', 'gh', 'pr', ')', '>', 'out', '<', 'in']], []],
+  ['echo "$(cat <<\'EOF\'\nx; y\nEOF\n)"', [['echo', '$(cat <<\'EOF\'\nx; y\nEOF\n)']], ['$(cat <<\'EOF\'\nx; y\nEOF\n)']],
+  ['$X "$X" ${X} `x` $(x) mer$()ge', [['$X', '$X', '${X}', '`x`', '$(x)', 'mer$()ge']], ['$X', '$X', '${X}', '`x`', '$(x)', 'mer$()ge']],
+  ['{merge,} {1..3} mer*e m?rge [m]erge ~/gh =gh', [['{merge,}', '{1..3}', 'mer*e', 'm?rge', '[m]erge', '~/gh', '=gh']], ['{merge,}', '{1..3}', 'mer*e', 'm?rge', '[m]erge', '~/gh', '=gh']],
+  [`$"x" $'\\u006d' [ [[ ] { }`, [['x', '\\u006d', '[', '[[', ']', '{', '}']], ['x', '\\u006d']],
+  ["gh pr view # it's a#b\ngh mm a#b", [['gh', 'pr', 'view'], ['gh', 'mm', 'a#b']], []],
+]
+
+test('shellPieces rebuilds Bash words from quotes, escapes, continued lines and $\'…\', and marks words built at run time', () => {
+  for (const [command, words, runTime] of SHELL_WORDS) {
+    const pieces = shellPieces(command)
+    expect([command, pieces.map(piece => piece.words.map(word => word.text))]).toEqual([command, words])
+    expect([command, pieces.flatMap(piece => piece.words.filter(word => word.isRunTime).map(word => word.text))]).toEqual([command, runTime])
+  }
+  // A heredoc's lines are its body, not commands of their own, and its own quoting does not carry past them.
+  const heredoc = shellPieces(`cat <<'EOF'\nit's {a,b}\nEOF\necho ok`)
+  expect(heredoc.map(piece => [piece.isBody, piece.words.map(word => word.text)])).toEqual([
+    [false, ['cat', '<<', 'EOF']],
+    [true, ['its {a,b}']],
+    [false, ['echo', 'ok']],
+  ])
+  expect(shellPieces('cat <<-EOF\n\tbody\n\tEOF\necho ok').map(piece => piece.isBody)).toEqual([false, true, false])
+})
+
+// gh pr merge spelled the way Bash rebuilds it: quoted or escaped words, continued lines, $'…' and -R / --repo first.
+const SPELLED_MERGES = [
+  '"gh" pr merge 12 --squash',
+  `g''h pr merge 12 --squash`,
+  'gh "pr" merge 12 --squash',
+  `gh pr mer''ge 12 --squash`,
+  'gh pr mer"ge" 12 --squash',
+  'gh pr \\merge 12 --squash',
+  `gh pr $'\\x6d'erge 12 --squash`,
+  'gh \\\npr merge 12 --squash',
+  'gh pr \\\nmerge 12 --squash',
+  'gh -R me/site pr merge 12 --squash',
+  'gh --repo me/site pr merge 12 --squash',
+  'gh --repo=me/site pr merge 12 --squash',
+  'gh pr -R me/site merge 12 --squash',
+]
+// The sanctioned merge with something hidden in it: --admin or --auto, another head commit, a word gh pr merge does
+// not take, or a word built at run time. Refused even at the approved head commit.
+const HIDDEN_MERGES = [
+  `${mergeAt(SHA)} --ad''min`,
+  `${mergeAt(SHA)} --a"uto"`,
+  `${mergeAt(SHA)} --\\admin`,
+  `${mergeAt(SHA)} $'--\\x61dmin'`,
+  `${mergeAt(SHA)} \\\n--admin`,
+  `${mergeAt(SHA)} --admin=false`,
+  `${mergeAt(SHA)} --match-head-commit e"${OTHER_SHA.slice(1)}"`,
+  `${mergeAt(SHA)} --match-head-commit $'\\x65'${OTHER_SHA.slice(1)}`,
+  `${mergeAt(SHA)} --mat''ch-head-commit ${OTHER_SHA}`,
+  `${mergeAt(SHA)} --match-head-commit=${OTHER_SHA}`,
+  `${mergeAt(SHA)} --match-head-commit`,
+  `${mergeAt(SHA)} --match-head-commit "$HEAD"`,
+  `${mergeAt(SHA)} $EXTRA`,
+  `${mergeAt(SHA)} --unknown`,
+  `${mergeAt(SHA)} -h`,
+  `${mergeAt(SHA)} 13`,
+  `bash -c "${mergeAt(SHA)} --ad\\\\min"`,
+  `bash -c '${mergeAt(SHA)} --ad\\min'`,
+  `bash -c "${mergeAt(SHA)} --match-head-commit e${OTHER_SHA.slice(1)}"`,
+  `gh pr merge --match-head-commit ${SHA} -b= --match-head-commit ${OTHER_SHA}`,
+  `gh pr merge 12 --body --admin --match-head-commit ${SHA}`,
+  `gh pr merge 12 --match_head_commit ${OTHER_SHA} --match-head-commit ${SHA}`,
+  `${mergeAt(SHA)} >merged.txt`,
+]
+// gh, or its first two words, built at run time: Bash could spell anything there, so Ship it refuses them.
+const RUN_TIME_GH = [
+  'gh pr {merge,} 12 --admin',
+  'gh pr mer$()ge 12 --admin',
+  'gh pr mer*e 12 --admin',
+  'gh pr m?rge 12 --admin',
+  'gh pr [m]erge 12 --admin',
+  'gh pr $SUB 12',
+  'gh "$PR" merge 12',
+  'gh pr `echo merge` 12',
+  'gh $(echo pr) merge 12',
+  `gh pr $'\\u006d'erge 12`,
+  '$GH pr merge 12',
+  '"$GH" pr merge 12',
+  'g$()h pr merge 12',
+  '~/bin/gh mm 12',
+  '=gh mm 12',
+  'env $GH pr merge 12',
+]
+// gh with a first word that is not one of gh's own commands: an alias or extension could run a merge.
+const UNKNOWN_GH = [
+  'gh mm 12 --admin',
+  'gh co 12',
+  'gh my-ext merge 12',
+  '"gh" mm 12',
+  'gh -R me/site mm 12',
+  'env gh mm 12',
+  'sudo -u me gh mm 12',
+  'bash -c "gh mm 12"',
+  'eval "gh mm 12"',
+  'gh \\\nmm 12',
+  'gh extension exec mm 12',
+  "git status # don't\ngh mm 12",
+  'echo $("gh" mm 12)',
+  'X=`g\'\'h mm 12`',
+]
+const MERGE_BODY = '{"query":"mutation{mergePullRequest(input:{pullRequestId:\\"X\\"}){clientMutationId}}"}'
+// gh api and curl or wget merges whose command word Bash rebuilds: quoted, escaped, continued or after -R.
+const SPELLED_API = [
+  `"gh" api graphql --input - <<EOF\n${MERGE_BODY}\nEOF`,
+  `gh \\\napi graphql --input - <<EOF\n${MERGE_BODY}\nEOF`,
+  `g''h api -X PUT repos/me/site/pulls/12/merge`,
+  'gh "api" -X PUT repos/me/site/pulls/12/merge',
+  'gh -R me/site api -X PUT repos/{owner}/{repo}/pulls/12/merge',
+  '"/usr/bin/gh" api -X PUT repos/me/site/pulls/12/merge',
+]
+const SPELLED_HTTP = [
+  '"curl" -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  `cu''rl -X PUT https://api.github.com/repos/me/site/pulls/12/merge`,
+  'cu\\\nrl -X PUT https://api.github.com/repos/me/site/pulls/12/merge',
+  '"wget" --method=PUT https://api.github.com/repos/me/site/pulls/12/merge',
+]
+// Ordinary commands during Ship it that stay allowed: they read, mention or create, and never merge.
+const WORD_HARMLESS = [
+  'gh pr view 12 --json headRefOid,mergeable',
+  'gh pr checks 12 --watch',
+  'gh pr checks --watch',
+  'gh -R me/site pr view 12',
+  'gh api repos/{owner}/{repo}/pulls/12',
+  'gh --version',
+  'gh',
+  `gh alias set mm 'pr merge'`,
+  'gh pr create --title "Read gh pr merge as words" --body "Refuses gh pr merge --admin"',
+  `git commit -m "$(cat <<'EOF'\nfix(ship): read gh pr merge as shell words\n\nNo --admin, no --auto.\nEOF\n)"`,
+  `gh pr create --body-file - <<'EOF'\n## Why\n* gh is used; $5 a month\n{"a":1,"b":2}\nEOF`,
+  'echo "gh pr merge 12 --admin"',
+  `grep -rn 'gh pr merge' README.md`,
+  'git status && git log --oneline -5',
+  'for f in *.ts; do echo "$f"; done',
+  'cd "$HOME/site" && npm test',
+  'if [ -n "$CI" ]; then echo ci; fi',
+  'ls ~/site *.md',
+  `git commit -m "$(cat <<'EOF'\nIt's fine (really\nEOF\n)"`,
+  'HEAD=$(gh pr view 12 --json headRefOid -q .headRefOid) && echo "$HEAD"',
+]
+
+test('unsafeMerge reads gh pr merge as shell words: spelled merges need the approval, and allowed ones count as merges', () => {
+  for (const command of SPELLED_MERGES) {
+    expect([command, runsPrMerge(command)]).toEqual([command, true])
+    expect(unsafeMerge(command, null)).toContain('Approve merge')
+    expect(unsafeMerge(command, SHA)).toContain('Approve merge')
+    expect(unsafeMerge(`${command} --admin`, SHA)).toContain('--admin or --auto')
+    // The sanctioned merge, however Bash spells it, runs at the approved head commit and uses the approval.
+    const sanctioned = `${command} --delete-branch --match-head-commit ${SHA}`
+    expect([sanctioned, unsafeMerge(sanctioned, SHA)]).toEqual([sanctioned, null])
+    expect(runsPrMerge(sanctioned)).toBe(true)
+    expect(unsafeMerge(sanctioned, OTHER_SHA)).toContain('Approve merge')
+    expect(unsafeMerge(`${sanctioned}; true`, SHA)).toContain('on its own')
+  }
+  for (const command of [
+    `"bash" -c "${mergeAt(SHA)}"`,
+    `${mergeAt(SHA)} --match-head-commit=${SHA}`,
+    `gh pr merge 12 -sd --match-head-commit "${SHA}"`,
+    `${mergeAt(SHA)} \\\n`,
+    `${mergeAt(SHA)} # a note`,
+  ]) {
+    expect([command, unsafeMerge(command, SHA)]).toEqual([command, null])
+    expect(runsPrMerge(command)).toBe(true)
+  }
+})
+
+test('unsafeMerge never lets an approval carry --admin, --auto, another head commit or a hidden word', () => {
+  for (const command of HIDDEN_MERGES) {
+    expect([command, unsafeMerge(command, SHA)]).not.toEqual([command, null])
+    expect(unsafeMerge(command, null)).not.toBeNull()
+  }
+  for (const command of HIDDEN_MERGES.slice(0, 6)) expect(unsafeMerge(command, SHA)).toContain('--admin or --auto')
+  for (const command of HIDDEN_MERGES.slice(6, 11)) expect(unsafeMerge(command, SHA)).toContain('Approve merge')
+  // A merge gh is reached through by a path, quoted or not, or after a wrapper, is a wrapper.
+  for (const command of [`"/opt/homebrew/bin/gh" pr merge 12 --delete-branch --match-head-commit ${SHA}`, `env "gh" pr merge 12 --match-head-commit ${SHA}`, `watch "gh" pr merge 12`, 'X=$("gh" pr merge 12 --admin)']) {
+    expect(unsafeMerge(command, SHA)).toContain('directly')
+  }
+})
+
+test('unsafeMerge refuses gh words built at run time and gh aliases or extensions, approved or not', () => {
+  for (const command of RUN_TIME_GH) {
+    expect([command, unsafeMerge(command, null)]).not.toEqual([command, null])
+    expect(unsafeMerge(command, SHA)).not.toBeNull()
+  }
+  for (const command of RUN_TIME_GH) expect(unsafeMerge(command, SHA)).toContain('built at run time')
+  for (const command of UNKNOWN_GH) {
+    expect([command, unsafeMerge(command, null)]).not.toEqual([command, null])
+    expect(unsafeMerge(command, SHA)).toContain('alias or extension')
+  }
+})
+
+test('unsafeMerge refuses gh api, curl and wget merges whose command word is quoted, escaped or continued', () => {
+  for (const command of SPELLED_API) {
+    expect([command, runsPrMerge(command)]).toEqual([command, false])
+    expect(unsafeMerge(command, null)).toBe(API_REFUSAL)
+    expect(unsafeMerge(command, SHA)).toBe(API_REFUSAL)
+  }
+  for (const command of SPELLED_HTTP) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, HTTP_REFUSAL])
+    expect(unsafeMerge(command, SHA)).toBe(HTTP_REFUSAL)
+  }
+})
+
+test('unsafeMerge leaves ordinary gh, git and shell commands alone while it reads words', () => {
+  for (const command of WORD_HARMLESS) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, null])
+    expect(unsafeMerge(command, SHA)).toBeNull()
+    expect(runsPrMerge(command)).toBe(false)
+  }
+})
+
 test('askedMergeSha reads the full head commit from the approval line', () => {
   expect(askedMergeSha(`Checks passed.\nReply exactly: Approve merge ${SHA}\nAnything else leaves the pull request open.`)).toBe(SHA)
   expect(askedMergeSha(`Reply exactly: \`Approve merge ${SHA}\``)).toBe(SHA)
@@ -2513,6 +2744,67 @@ test('a refused gh api stdin merge leaves the approval and Ship it as they were,
   expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
   // That merge worked and ended Ship it.
   expect(await tries(STDIN_MERGES[0])).toBeUndefined()
+})
+
+// Every spelling Ship it refuses at the approved head commit or without it, as Claude or a helper would send it.
+const WORD_REFUSED = [...HIDDEN_MERGES, ...RUN_TIME_GH, ...UNKNOWN_GH, ...SPELLED_API, ...SPELLED_HTTP]
+
+test('Ship it refuses merges Bash spells in other words from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'Bash', command, ...extra })).deny
+  for (const command of [...SPELLED_MERGES, ...WORD_REFUSED]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of [...SPELLED_MERGES, ...WORD_REFUSED]) {
+    expect([command, await tries(command)]).not.toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeDefined()
+  }
+  for (const command of WORD_HARMLESS) {
+    expect([command, await tries(command)]).toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  // Refusing them does not end Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of [...SPELLED_MERGES, ...WORD_REFUSED]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused spelled merge leaves the approval; a spelled sanctioned merge uses it once, and a failed one needs a fresh approval', async ($, on) => {
+  const { ask, tries, failMerges, ends } = await shipping($, on)
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of WORD_REFUSED) {
+    expect([command, await tries(command)]).not.toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeDefined()
+  }
+  // Still guarded, nothing recorded as merged, and the approval is unused: the quoted sanctioned merge runs once.
+  expect(await tries('"gh" pr merge 12 --squash')).toContain('Approve merge')
+  failMerges(true)
+  const spelled = `"gh" pr mer''ge 12 --squash --delete-branch --match-head-commit ${SHA}`
+  expect(await tries(spelled, { agentId: 'a1' })).toBeUndefined()
+  // One approval, one attempt: the next one, spelled or plain, from Claude or a helper, needs a fresh approval.
+  expect(await tries(spelled)).toContain('Approve merge')
+  expect(await tries(mergeAt(SHA), { agentId: 'a1' })).toContain('Approve merge')
+  await ends('t3', 'The merge failed: the branch is out of date.')
+  await $.turn.start({ text: 'Update the branch and try again', turnId: 't4' })
+  await ask(SHA, 't4')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't5' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  failMerges(false)
+  expect(await tries(`gh -R me/site pr merge 12 --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
+  // That merge worked and ended Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
 })
 
 // MCP tools that merge a pull request, turn on auto-merge or add it to a merge queue, under two server prefixes.

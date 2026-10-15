@@ -460,6 +460,204 @@ export function askedMergeSha(answer: string): string | null {
   return [...answer.matchAll(/Reply exactly:\s*`?Approve merge ([0-9a-f]{40})`?/g)].pop()?.[1] ?? null
 }
 
+/**
+ * A word as Bash passes it on, and whether Bash builds it at run time: from $…, `…`, a glob, {a,b}, ~ or =. `runs`
+ * holds the code of an unquoted $(…) or `…` in it, which Bash runs first.
+ */
+export type ShellWord = { text: string; isRunTime: boolean; runs?: string[] }
+/** The words of one command, or of one line of a heredoc's body. */
+export type ShellPiece = { words: ShellWord[]; isBody: boolean }
+
+// $'…' escapes every shell spells alike; \u, \U and \c differ between Bash 3.2, newer Bash and zsh.
+const ANSI_C: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' }
+// A heredoc's start, <<EOF, <<-EOF, <<'EOF' or <<"EOF"; a delimiter spelled any other way leaves its lines as commands.
+const HEREDOC = /^<<(-?)[ \t]*(['"]?)([^\s'"<>;|&()]+)\2(?=[\s;|&<>()]|$)/
+
+/**
+ * Reads a Bash command into pieces of words the way Bash spells them before it runs anything: \ and a newline go,
+ * \c is c, '…', "…" (with \" \\ \$ \` and \ newline) and $'…' join their neighbours into one word, # starts a
+ * comment, a heredoc's lines are its body, ; | & and newlines end a piece, and ( ) < > stand as words of their own.
+ * shortcut: a bounded lexer, not a parser; it never runs or expands anything. A word built at run time keeps its text
+ * as written and is marked, and $(…) is read to its matching ) past quotes and heredocs only.
+ */
+export function shellPieces(command: string): ShellPiece[] {
+  const pieces: ShellPiece[] = []
+  const heredocs: { delimiter: string; isTabbed: boolean }[] = []
+  let words: ShellWord[] = []
+  let word: ShellWord | null = null
+  // The word's unquoted characters, where globs and brace lists count.
+  let bare = ''
+  const add = (text: string, isQuoted = false): ShellWord => {
+    // ~ and zsh's = expand only at the start of a word, unquoted.
+    word ??= { text: '', isRunTime: !isQuoted && /^[~=]/.test(text) }
+    word.text += text
+    if (!isQuoted) bare += text
+    return word
+  }
+  const runTime = (text: string, runs?: string) => {
+    const one = add(text, true)
+    one.isRunTime = true
+    if (runs !== undefined) (one.runs ??= []).push(runs)
+  }
+  const endWord = () => {
+    if (word !== null) {
+      if (/[*?]|\[[^\]]+\]|\{.*(?:,|\.\.).*\}/.test(bare)) word.isRunTime = true
+      words.push(word)
+    }
+    word = null
+    bare = ''
+  }
+  const endPiece = () => {
+    endWord()
+    pieces.push({ words, isBody: false })
+    words = []
+  }
+  // The index of the next unescaped quote, or the end.
+  const end = (from: number, quote: string): number => {
+    for (let at = from; at < command.length; at++) {
+      if (command[at] === '\\' && quote !== "'") at++
+      else if (command[at] === quote) return at
+    }
+    return command.length
+  }
+  // A heredoc's body lines from `from`, and the index of the newline that ends its delimiter line.
+  const body = (from: number, delimiter: string, isTabbed: boolean) => {
+    const lines: string[] = []
+    for (let at = from; at < command.length; ) {
+      const stop = command.indexOf('\n', at) < 0 ? command.length : command.indexOf('\n', at)
+      const line = command.slice(at, stop)
+      if ((isTabbed ? line.replace(/^\t+/, '') : line) === delimiter) return { lines, next: stop }
+      lines.push(line)
+      at = stop + 1
+    }
+    return { lines, next: command.length }
+  }
+  // The index of the ) of $( or the } of ${, past quotes and heredocs.
+  const closing = (from: number, open: string, close: string): number => {
+    let depth = 0
+    for (let at = from; at < command.length; at++) {
+      const char = command[at]
+      const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
+      if (char === '\\') at++
+      else if (char === "'" || char === '"' || char === '`') at = end(at + 1, char)
+      else if (heredoc && command.indexOf('\n', at) >= 0) at = body(command.indexOf('\n', at) + 1, heredoc[3], heredoc[1] === '-').next
+      else if (char === open) depth++
+      else if (char === close && --depth === 0) return at
+    }
+    return command.length
+  }
+  // $'…', decoded; returns the index of its closing quote.
+  const ansiC = (from: number): number => {
+    let text = ''
+    let isShellSpecific = false
+    let at = from
+    for (; at < command.length && command[at] !== "'"; at++) {
+      if (command[at] !== '\\') {
+        text += command[at]
+        continue
+      }
+      const code = command[++at] ?? ''
+      const hex = code === 'x' ? /^[0-9A-Fa-f]{1,2}/.exec(command.slice(at + 1)) : null
+      const octal = /^[0-7]{1,3}/.exec(command.slice(at))
+      if (Object.hasOwn(ANSI_C, code)) text += ANSI_C[code]
+      else if (hex) {
+        text += String.fromCharCode(parseInt(hex[0], 16))
+        at += hex[0].length
+      } else if (octal) {
+        text += String.fromCharCode(parseInt(octal[0], 8))
+        at += octal[0].length - 1
+      } else {
+        isShellSpecific ||= code !== '' && 'uUc'.includes(code)
+        text += `\\${code}`
+      }
+    }
+    add(text, true).isRunTime ||= isShellSpecific
+    return at
+  }
+  // $… or `…`: a word built at run time, kept as written; returns the index of its last character.
+  const dollar = (at: number, isQuoted: boolean): number => {
+    const next = command[at + 1] ?? ''
+    if (command[at] === '`') {
+      const stop = end(at + 1, '`')
+      runTime(command.slice(at, stop + 1), isQuoted ? undefined : command.slice(at + 1, stop))
+      return stop
+    }
+    if (next === "'" && !isQuoted) return ansiC(at + 2)
+    // $"…" is translated at run time; the "…" itself is read next.
+    if (next === '"' && !isQuoted) {
+      runTime('')
+      return at
+    }
+    if (next === '(' || next === '{') {
+      const stop = closing(at + 1, next, next === '(' ? ')' : '}')
+      // shortcut: the code of "$(…)" in double quotes, like a commit message from a heredoc, is not read.
+      const isCode = next === '(' && command[at + 2] !== '(' && !isQuoted
+      runTime(command.slice(at, stop + 1), isCode ? command.slice(at + 2, stop) : undefined)
+      return stop
+    }
+    const name = /^(?:[A-Za-z_]\w*|[0-9@*#?$!-])/.exec(command.slice(at + 1))
+    if (name === null) {
+      add('$', isQuoted)
+      return at
+    }
+    runTime(`$${name[0]}`)
+    return at + name[0].length
+  }
+  // "…", unescaped; returns the index of its closing quote.
+  const doubleQuoted = (from: number): number => {
+    add('', true)
+    for (let at = from; at < command.length; at++) {
+      const char = command[at]
+      const next = command[at + 1]
+      if (char === '"') return at
+      if (char === '\\' && next !== undefined && '"\\$`\n'.includes(next)) {
+        at++
+        if (next !== '\n') add(next, true)
+      } else if (char === '$' || char === '`') at = dollar(at, true)
+      else add(char, true)
+    }
+    return command.length
+  }
+
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at]
+    const next = command[at + 1]
+    if (char === '\\') {
+      at++
+      if (next !== '\n') add(next ?? '\\', true)
+    } else if (char === "'") {
+      const stop = end(at + 1, "'")
+      add(command.slice(at + 1, stop), true)
+      at = stop
+    } else if (char === '"') at = doubleQuoted(at + 1)
+    else if (char === '$' || char === '`') at = dollar(at, false)
+    else if (char === '#' && word === null) {
+      // A comment runs to the end of its line.
+      const stop = command.indexOf('\n', at)
+      at = (stop < 0 ? command.length : stop) - 1
+    } else if (char === ' ' || char === '\t') endWord()
+    else if (';|&\n'.includes(char)) {
+      endPiece()
+      if ((char === '|' || char === '&') && next === char) at++
+      // After the line that starts them, heredocs' bodies, in order.
+      for (const { delimiter, isTabbed } of char === '\n' ? heredocs.splice(0) : []) {
+        const { lines, next: stop } = body(at + 1, delimiter, isTabbed)
+        for (const line of lines) pieces.push(...shellPieces(line).map(piece => ({ ...piece, isBody: true })))
+        at = stop
+      }
+    } else if ('()<>'.includes(char)) {
+      endWord()
+      const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
+      const operator = command.startsWith('<<<', at) ? '<<<' : heredoc ? `<<${heredoc[1]}` : command.startsWith('>>', at) ? '>>' : char
+      if (heredoc && operator !== '<<<') heredocs.push({ delimiter: heredoc[3], isTabbed: heredoc[1] === '-' })
+      words.push({ text: operator, isRunTime: false })
+      at += operator.length - 1
+    } else add(char)
+  }
+  endPiece()
+  return pieces
+}
+
 /** Splits a shell command at ;, |, ||, &, && and newlines that stand outside single and double quotes. */
 function commandPieces(command: string): string[] {
   const pieces: string[] = []
@@ -486,8 +684,8 @@ function commandPieces(command: string): string[] {
 
 // The pieces of a command that run gh: pieces at the top level, and pieces of the quoted command string of
 // bash -c, sh -c or zsh -c. Text inside other quotes, like a commit message, is never a piece of its own.
-// shortcut: reads the command as text; gh reached through a variable, an alias, a script file or $(…) is not
-// detected, and a heredoc line that starts with gh pr merge counts as a merge (refused, never allowed by mistake).
+// shortcut: reads the command as text; the word checks below see quoted and escaped spellings, and a heredoc line
+// that starts with gh pr merge counts as a merge (refused, never allowed by mistake).
 const WRAPPED = /^\s*(?:ba|z)?sh\s+-c\s+(["'])([\s\S]*)\1\s*$/
 const ghPieces = (command: string): string[] =>
   commandPieces(command).flatMap(piece => {
@@ -530,7 +728,8 @@ const runsHttpClient = (command: string): boolean =>
   })
 
 /** Whether a shell command runs `gh pr merge`, as the Ship it guard reads it; text that only mentions it does not. */
-export const runsPrMerge = (command: string) => ghPieces(command).some(piece => PR_MERGE.test(piece))
+export const runsPrMerge = (command: string) =>
+  ghPieces(command).some(piece => PR_MERGE.test(piece)) || wordFindings(command, command).some(found => 'merge' in found)
 
 // MCP actions that merge a pull request, turn on auto-merge or add it to a merge queue, lowercased without _ and -.
 // shortcut: an exact closed list, so a merge tool by another name passes; add names seen in a supported server.
@@ -548,41 +747,200 @@ const APPROVED_ONLY =
   'checks and the full head SHA, then "Reply exactly: Approve merge <full SHA>", and wait for exactly that reply. ' +
   'Then run gh pr merge --squash --delete-branch --match-head-commit <that full SHA>.'
 
+// The Ship it guard's refusals, shared by the text checks and the word checks.
+const NEVER_ADMIN = 'Ship it never merges with --admin or --auto. Leave the pull request open and tell the person why it cannot merge.'
+const DIRECT_ONLY =
+  'Ship it merges only with gh pr merge run directly, never through (…), !, env, command, sudo, exec, eval, ' +
+  'a path or another wrapper. Run gh pr merge --squash --delete-branch --match-head-commit <approved SHA> on its own.'
+const ON_ITS_OWN = 'Run the approved gh pr merge on its own, with nothing before or after it, so its exit code shows whether it merged.'
+const NO_HTTP = 'Ship it merges only with gh pr merge --match-head-commit, never through curl or wget. Leave the pull request open.'
+const NO_API = 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
+const RUN_TIME =
+  'While Ship it runs, a command and the first words of gh are never built at run time ($…, `…`, a glob, {a,b}, ~ or =). ' +
+  'Spell them out.'
+const GH_ALIAS = 'While Ship it runs, gh runs only its own commands, never an alias or extension, which could hide a merge. Spell the gh command out.'
+const MERGE_WORDS =
+  'Ship it merges only with gh pr merge, its own flags and at most one pull request. ' +
+  'Run gh pr merge --squash --delete-branch --match-head-commit <approved SHA> on its own.'
+
+// gh's own top-level commands, their built-in aliases and its help topics (gh 2.100, `gh help`). Any other first word
+// is an alias or extension, which could run a merge the guard cannot read; so is gh extension exec.
+// shortcut: a fixed list; a gh command added later is refused during Ship it until it is listed here.
+const GH_COMMANDS = new Set(
+  (
+    'agent-task agent-tasks agent agents alias api attestation at auth browse cache codespace cs completion config copilot ' +
+    'discussion extension extensions ext gist gpg-key help issue label licenses org pr preview project release repo ruleset ' +
+    'rs run search secret skill skills ssh-key status variable version workflow ' +
+    'accessibility actions environment exit-codes formatting mintty reference telemetry'
+  ).split(' '),
+)
+const GH_EXTENSION = new Set(['extension', 'extensions', 'ext'])
+// gh pr merge's own flags (gh 2.100), with the inherited --repo and --help, and whether each takes a value.
+const MERGE_FLAGS = new Map(
+  Object.entries({
+    admin: false, auto: false, 'author-email': true, body: true, 'body-file': true, 'delete-branch': false, 'disable-auto': false,
+    help: false, 'match-head-commit': true, merge: false, rebase: false, repo: true, squash: false, subject: true,
+  }),
+)
+const MERGE_SHORT = new Map(Object.entries({ A: 'author-email', b: 'body', F: 'body-file', d: 'delete-branch', m: 'merge', r: 'rebase', R: 'repo', s: 'squash', t: 'subject' }))
+
+// Words before a command: ( { ! and keywords (P), VAR=x (A), wrappers that run the words after them (W), their
+// options (O) and anything else (X). A command stands first, after P and A, or anywhere after a wrapper.
+const PREFIXES = new Set(['(', '{', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until'])
+const WRAPPERS = new Set(['env', 'command', 'builtin', 'sudo', 'doas', 'exec', 'time', 'xargs', 'nohup', 'nice', 'timeout', 'watch'])
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
+const AT_COMMAND = /^(?:[PA]|W[WOX]*)*$/
+const baseName = (text: string) => text.slice(text.lastIndexOf('/') + 1)
+const wordClass = ({ text, isRunTime }: ShellWord) =>
+  /^[A-Za-z_]\w*=/.test(text) ? 'A' : isRunTime ? 'X' : PREFIXES.has(text) ? 'P' : WRAPPERS.has(baseName(text)) ? 'W' : text.startsWith('-') ? 'O' : 'X'
+
+// The first two words gh reads as its command, past -R / --repo and other flags; null when one is built at run time.
+function ghCommand(args: ShellWord[]): string[] | null {
+  const found: string[] = []
+  let isPastFlags = false
+  for (let at = 0; at < args.length && found.length < 2; at++) {
+    const { text, isRunTime } = args[at]
+    if (isRunTime) return null
+    if (isPastFlags || !text.startsWith('-') || text === '-') found.push(text)
+    else if (text === '--') isPastFlags = true
+    else if (text === '-R' || text === '--repo') at++
+  }
+  return found
+}
+
+type WordFinding = { refusal: string } | { merge: ShellWord[]; isAlone: boolean }
+
+/**
+ * What a command runs, read as the words Bash passes on: gh merges, gh api and curl or wget merge routes, gh aliases
+ * and extensions, and command words built at run time, in the command itself and in the code bash -c or eval runs.
+ * A gh merge is direct only as the first word of the command, or of a plain bash -c "…"; anywhere else it is wrapped.
+ * Merge routes are looked for in the whole command as written, the way the text checks look for them.
+ */
+function wordFindings(code: string, command: string, isWrapped = false, isAlone = true, found: WordFinding[] = []): WordFinding[] {
+  // Blank space around the command runs nothing; a \ and newline at its end is a continued line, kept.
+  const pieces = shellPieces(code.replace(/^\s+|(?<!\\)\s+$/g, ''))
+  const alone = isAlone && pieces.length === 1
+  for (const { words, isBody } of pieces) {
+    const classes = words.map(wordClass).join('')
+    // A heredoc's line may start with anything; only the commands it names count.
+    if (words[classes.search(/[^PA]/)]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
+    words.forEach((word, at) => {
+      for (const code of word.runs ?? []) wordFindings(code, command, true, false, found)
+      const name = baseName(word.text)
+      const rest = words.slice(at + 1)
+      const isCommand = AT_COMMAND.test(classes.slice(0, at))
+      if (word.isRunTime) return
+      if (name === 'gh') {
+        const gh = ghCommand(rest)
+        if (gh === null) {
+          if (isCommand) found.push({ refusal: RUN_TIME })
+        } else if (gh[0] === 'pr' && gh[1] === 'merge') {
+          // Fails closed: gh pr merge anywhere else in a piece, even after echo, is read as a wrapped merge.
+          found.push(!isWrapped && !isBody && at === 0 && word.text === 'gh' ? { merge: rest, isAlone: alone } : { refusal: DIRECT_ONLY })
+        } else if (gh[0] === 'api' && MERGE_ROUTE.test(command)) found.push({ refusal: NO_API })
+        else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]) || (GH_EXTENSION.has(gh[0]) && gh[1] === 'exec'))) {
+          found.push({ refusal: GH_ALIAS })
+        }
+      } else if (!isCommand) {
+        return
+      } else if (WRAPPERS.has(name)) {
+        // The command a wrapper runs: its first word that is not an option or VAR=x.
+        if (rest.find(one => !/[OA]/.test(wordClass(one)))?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
+      } else if (SHELLS.has(name)) {
+        const isPlain = !isWrapped && !isBody && at === 0 && word.text === name && words.length === 3 && rest[0].text === '-c'
+        const flag = rest.findIndex(one => /^-\w*c/.test(one.text))
+        if (isPlain) wordFindings(rest[1].text, command, false, alone, found)
+        else if (flag >= 0) for (const one of rest.slice(flag + 1)) wordFindings(one.text, command, true, false, found)
+      } else if (name === 'eval') {
+        wordFindings(rest.map(one => one.text).join(' '), command, true, false, found)
+      } else if ((name === 'curl' || name === 'wget') && MERGE_ROUTE.test(command)) {
+        found.push({ refusal: NO_HTTP })
+      }
+    })
+  }
+  return found
+}
+
+/**
+ * Why a direct gh pr merge may not run, read the way gh's flag parser reads its words, or null when it is the
+ * approved merge: no word built at run time, no --admin or --auto in any word, only gh pr merge's own flags and at most
+ * one pull request, every --match-head-commit (gh keeps the last) the approved head commit, and nothing else run.
+ */
+function mergeRefusal(args: ShellWord[], approvedSha: string | null, isAlone: boolean): string | null {
+  if (args.some(word => word.isRunTime)) return RUN_TIME
+  if (args.some(word => /^--(admin|auto)(=|$)/.test(word.text))) return NEVER_ADMIN
+  const positionals: string[] = []
+  const shas: string[] = []
+  for (let at = 0; at < args.length; at++) {
+    const text = args[at].text
+    if (text === '--') {
+      positionals.push(...args.slice(at + 1).map(word => word.text))
+      break
+    }
+    if (!text.startsWith('-') || text === '-') {
+      positionals.push(text)
+      continue
+    }
+    let flag: string | undefined
+    let value: string | undefined
+    if (text.startsWith('--')) {
+      const equals = text.indexOf('=')
+      flag = text.slice(2, equals < 0 ? undefined : equals)
+      value = equals < 0 ? undefined : text.slice(equals + 1)
+      if (!MERGE_FLAGS.has(flag)) return MERGE_WORDS
+    } else {
+      // Short flags run together (-sd); one that takes a value takes the rest of the word (past a =) or the next word.
+      for (let one = 1; one < text.length && flag === undefined; one++) {
+        const name = MERGE_SHORT.get(text[one])
+        const after = text.slice(one + 1)
+        if (name === undefined) return MERGE_WORDS
+        if (MERGE_FLAGS.get(name)) {
+          flag = name
+          value = after.length > 1 && after[0] === '=' ? after.slice(1) : after || undefined
+        } else if (after[0] === '=') break
+      }
+    }
+    if (flag !== undefined && MERGE_FLAGS.get(flag) && value === undefined) value = args[++at]?.text
+    if (flag === 'match-head-commit') shas.push(value ?? '')
+  }
+  if (positionals[0] !== 'pr' || positionals[1] !== 'merge' || positionals.length > 3) return MERGE_WORDS
+  if (approvedSha === null || shas.length === 0 || shas.some(sha => sha !== approvedSha)) return APPROVED_ONLY
+  return isAlone ? null : ON_ITS_OWN
+}
+
 /**
  * Why a shell command may not run during Ship it, or null when it may. Every `gh pr merge` it runs, wrapped in
  * `bash -c` or not, names only the approved head commit with --match-head-commit and never --admin or --auto, and is
  * the whole command, so a failed merge is never read as a success; merging through `gh api`, curl or wget is never allowed.
+ * The command is read twice: as text, and as the words Bash rebuilds from it (see shellPieces), so a quoted or escaped
+ * word, a continued line, -R before pr merge, a gh alias or extension, or gh words built at run time hide no merge.
  */
 export function unsafeMerge(command: string, approvedSha: string | null): string | null {
   // The route may sit anywhere in the written command: a heredoc body, a continued line or a literal variable.
   if (MERGE_ROUTE.test(command) && runsHttpClient(command)) {
-    return 'Ship it merges only with gh pr merge --match-head-commit, never through curl or wget. Leave the pull request open.'
+    return NO_HTTP
   }
   // Likewise for gh api, so a body it reads from stdin, like gh api graphql --input - <<EOF, is seen.
   // shortcut: reads the command as text; a body in a file (--input body.json) or made at run time is not seen, and any
   // gh api run beside a merge route in the text, like a heredoc that only writes one, is refused (never allowed by mistake).
   if (MERGE_ROUTE.test(command) && runsGhApi(command)) {
-    return 'Ship it merges only with gh pr merge --match-head-commit, never through gh api. Leave the pull request open.'
+    return NO_API
   }
   for (const part of ghPieces(command)) {
     if (!PR_MERGE.test(part)) {
-      if (wrappedMerge(part)) {
-        return (
-          'Ship it merges only with gh pr merge run directly, never through (…), !, env, command, sudo, exec, eval, ' +
-          'a path or another wrapper. Run gh pr merge --squash --delete-branch --match-head-commit <approved SHA> on its own.'
-        )
-      }
+      if (wrappedMerge(part)) return DIRECT_ONLY
       continue
     }
-    if (/(?<![\w-])--(admin|auto)\b/.test(part)) {
-      return 'Ship it never merges with --admin or --auto. Leave the pull request open and tell the person why it cannot merge.'
-    }
+    if (/(?<![\w-])--(admin|auto)\b/.test(part)) return NEVER_ADMIN
     const shas = [...part.matchAll(/(?<![\w-])--match-head-commit[=\s]+["']?([0-9a-f]{40})\b/g)].map(found => found[1])
     if (approvedSha === null || shas.length === 0 || shas.some(sha => sha !== approvedSha)) return APPROVED_ONLY
     // The tool's exit code is the merge's own only when nothing else runs: `; true`, `|| true` or `| cat` hide a failure.
-    if (ghPieces(command.trim()).length > 1) {
-      return 'Run the approved gh pr merge on its own, with nothing before or after it, so its exit code shows whether it merged.'
-    }
+    if (ghPieces(command.trim()).length > 1) return ON_ITS_OWN
+  }
+  // The same command read as the words Bash passes on.
+  for (const found of wordFindings(command, command)) {
+    const refusal = 'refusal' in found ? found.refusal : mergeRefusal(found.merge, approvedSha, found.isAlone)
+    if (refusal !== null) return refusal
   }
   return null
 }
