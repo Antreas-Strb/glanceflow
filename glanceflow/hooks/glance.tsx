@@ -95,8 +95,10 @@ import {
   settle,
   task,
   toggled,
+  runsPowerShellMerge,
   runsPrMerge,
   unsafeMerge,
+  unsafePowerShellMerge,
 } from './logic'
 
 import type { SavedChecklist } from './logic'
@@ -1750,11 +1752,13 @@ export function registerGlance(on: On): void {
           'own, never through an MCP tool. Leave the pull request open.',
       }
     }
-    if (tool === 'Bash' && isShipping && (await read($, enabledAtom))) {
+    if ((tool === 'Bash' || tool === 'PowerShell') && isShipping && (await read($, enabledAtom))) {
       const command = String((e as unknown as { command?: unknown }).command ?? '')
-      const denied = unsafeMerge(command, approvedSha)
+      // PowerShell quotes, escapes and spells commands unlike Bash, so it has its own stricter rule.
+      const isPowerShell = tool === 'PowerShell'
+      const denied = isPowerShell ? unsafePowerShellMerge(command, approvedSha) : unsafeMerge(command, approvedSha)
       if (denied !== null) return { deny: denied }
-      isMerging = runsPrMerge(command)
+      isMerging = isPowerShell ? runsPowerShellMerge(command) : runsPrMerge(command)
     }
 
     if (!isMain) {
