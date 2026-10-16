@@ -2576,6 +2576,13 @@ const INLINE_MERGES = [
   'env --split-string "gh pr merge 12"',
   'env -iS "gh pr merge 12"',
   `env -S "bash -c 'gh pr merge 12'"`,
+  // macOS env's -u, -C and -P take a value, in the next word or the same one, and env reads options past it.
+  `env -u FOO -S 'gh pr merge 31 --admin'`,
+  `env -C . -S 'gh pr merge 31 --admin'`,
+  `env -P /bin -S 'gh pr merge 31 --admin'`,
+  `env -uFOO -S 'gh pr merge 31 --admin'`,
+  `env -iu FOO -S 'gh pr merge 31 --admin'`,
+  `env -u FOO -u BAR -S 'gh pr merge 31 --admin'`,
 ]
 const INLINE_OTHERS: [string, string][] = [
   ['bash <<< "gh mm 12"', 'alias or extension'],
@@ -2583,6 +2590,7 @@ const INLINE_OTHERS: [string, string][] = [
   ['bash <<< "curl -X PUT https://api.github.com/repos/me/site/pulls/12/merge"', HTTP_REFUSAL],
   ['source /dev/stdin <<< "gh api -X PUT repos/me/site/pulls/12/merge"', API_REFUSAL],
   ['env -S "gh api graphql --input body.json"', QUERY_REFUSAL],
+  ['env -u FOO "$CMD"', 'built at run time'],
 ]
 // Ordinary commands that read, mention or write these routes and queries without merging: left alone.
 const ROUTE_HARMLESS = [
@@ -2601,6 +2609,7 @@ const ROUTE_HARMLESS = [
   `git commit -m "fix(ship): refuse gh api graphql --input body.json and env -S 'gh pr merge'"`,
   'bash <<< "gh pr view 12"',
   'env -S "gh pr view 12"',
+  'env -u FOO -S "gh pr view 12"',
   'cat <<< "gh pr merge 12"',
 ]
 

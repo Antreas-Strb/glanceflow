@@ -935,11 +935,15 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
       } else if (!isCommand) {
         return
       } else if (WRAPPERS.has(name)) {
-        // The command a wrapper runs: its first word that is not an option or VAR=x.
-        const run = rest.findIndex(one => !/[OA]/.test(wordClass(one)))
+        // The command a wrapper runs: its first word that is not an option or VAR=x. macOS env's -u, -C and -P
+        // (alone or last in -iu) take the next word as their value, and env reads its options past that word.
+        let run = 0
+        for (; run < rest.length && /[OA]/.test(wordClass(rest[run])); run++) {
+          if (name === 'env' && /^-[^-uCPS]*[uCP]$/.test(rest[run].text)) run++
+        }
         if (rest[run]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
         // env -S / --split-string runs the words of its value, like bash -c.
-        const split = name === 'env' ? (run < 0 ? rest : rest.slice(0, run)).findIndex(one => /^(?:-[^-]*S|--split-string(?:=|$))/.test(one.text)) : -1
+        const split = name === 'env' ? rest.slice(0, run).findIndex(one => /^(?:-[^-]*S|--split-string(?:=|$))/.test(one.text)) : -1
         if (split >= 0) {
           const text = rest[split].text
           const code = text.startsWith('--') ? text.slice('--split-string='.length) : text.slice(text.indexOf('S') + 1)
