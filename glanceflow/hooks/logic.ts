@@ -947,7 +947,10 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
         if (split >= 0) {
           const text = rest[split].text
           const code = text.startsWith('--') ? text.slice('--split-string='.length) : text.slice(text.indexOf('S') + 1)
-          wordFindings(code || (rest[split + 1]?.text ?? ''), command, true, false, found)
+          // env appends the words after the value to the split words: written ones join quoted as they are, and one
+          // built at run time as a quoted "$_", which reads as built at run time again.
+          const after = rest.slice(split + (code ? 1 : 2)).map(one => (one.isRunTime ? '"$_"' : `'${one.text.replace(/'/g, `'\\''`)}'`))
+          wordFindings([code || (rest[split + 1]?.text ?? ''), ...after].join(' '), command, true, false, found)
         }
       } else if (SHELLS.has(name) || name === 'source' || name === '.') {
         const isPlain = !isWrapped && !isBody && at === 0 && word.text === name && words.length === 3 && rest[0].text === '-c'

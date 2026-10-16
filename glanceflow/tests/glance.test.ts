@@ -2583,6 +2583,12 @@ const INLINE_MERGES = [
   `env -uFOO -S 'gh pr merge 31 --admin'`,
   `env -iu FOO -S 'gh pr merge 31 --admin'`,
   `env -u FOO -u BAR -S 'gh pr merge 31 --admin'`,
+  // env appends the words after the -S value to the split words it runs.
+  `env -S 'gh pr' merge 31 --admin`,
+  `env -S'gh pr' merge 31 --admin`,
+  `env -iS 'gh pr' merge 31 --admin`,
+  `env -u FOO -S 'gh pr' merge 31 --admin`,
+  `env -S gh pr "merge" 31`,
 ]
 const INLINE_OTHERS: [string, string][] = [
   ['bash <<< "gh mm 12"', 'alias or extension'],
@@ -2591,6 +2597,7 @@ const INLINE_OTHERS: [string, string][] = [
   ['source /dev/stdin <<< "gh api -X PUT repos/me/site/pulls/12/merge"', API_REFUSAL],
   ['env -S "gh api graphql --input body.json"', QUERY_REFUSAL],
   ['env -u FOO "$CMD"', 'built at run time'],
+  ['env -S \'gh pr\' "$SUB" 31', 'built at run time'],
 ]
 // Ordinary commands that read, mention or write these routes and queries without merging: left alone.
 const ROUTE_HARMLESS = [
@@ -2610,6 +2617,8 @@ const ROUTE_HARMLESS = [
   'bash <<< "gh pr view 12"',
   'env -S "gh pr view 12"',
   'env -u FOO -S "gh pr view 12"',
+  `env -S 'gh pr' view 31`,
+  `env -S 'gh pr view' "$PR"`,
   'cat <<< "gh pr merge 12"',
 ]
 
