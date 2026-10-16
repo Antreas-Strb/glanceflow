@@ -2256,7 +2256,6 @@ const SPELLED_MERGES = [
   'gh -R me/site pr merge 12 --squash',
   'gh --repo me/site pr merge 12 --squash',
   'gh --repo=me/site pr merge 12 --squash',
-  'gh pr -R me/site merge 12 --squash',
 ]
 // The sanctioned merge with something hidden in it: --admin or --auto, another head commit, a word gh pr merge does
 // not take, or a word built at run time. Refused even at the approved head commit.
@@ -2320,6 +2319,21 @@ const UNKNOWN_GH = [
   "git status # don't\ngh mm 12",
   'echo $("gh" mm 12)',
   'X=`g\'\'h mm 12`',
+]
+// gh pr with a flag before its subcommand: the guard does not guess how many words the flag takes, so gh could read
+// the next one as merge. Refused, approved or not, -R and --repo included; before pr they stay allowed.
+const PR_FLAG_FIRST = [
+  'gh pr --body x merge 12 --admin',
+  'gh pr -b x merge 12 --admin',
+  'gh pr --subject x merge 12 --auto --squash',
+  `gh pr --body x merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh pr -b x merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `"gh" pr --b''ody x merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh pr -R me/site merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh pr --repo=me/site merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `gh pr -- merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  `bash -c "gh pr -b x merge 12 --squash --delete-branch --match-head-commit ${SHA}"`,
+  'env gh pr -b x merge 12',
 ]
 const MERGE_BODY = '{"query":"mutation{mergePullRequest(input:{pullRequestId:\\"X\\"}){clientMutationId}}"}'
 // gh api and curl or wget merges whose command word Bash rebuilds: quoted, escaped, continued or after -R.
@@ -2409,6 +2423,24 @@ test('unsafeMerge refuses gh words built at run time and gh aliases or extension
     expect([command, unsafeMerge(command, null)]).not.toEqual([command, null])
     expect(unsafeMerge(command, SHA)).toContain('alias or extension')
   }
+})
+
+test('unsafeMerge refuses gh pr with a flag before its subcommand, approved or not, and keeps -R or --repo before pr', () => {
+  for (const command of PR_FLAG_FIRST) {
+    expect([command, unsafeMerge(command, null)]).not.toEqual([command, null])
+    expect([command, unsafeMerge(command, SHA)]).toEqual([command, expect.stringContaining('right after pr')])
+  }
+  for (const command of [
+    mergeAt(SHA),
+    `gh -R me/site pr merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+    `gh --repo me/site pr merge 12 --squash --delete-branch --match-head-commit ${SHA}`,
+  ]) {
+    expect([command, unsafeMerge(command, SHA)]).toEqual([command, null])
+    expect(runsPrMerge(command)).toBe(true)
+  }
+  expect(unsafeMerge('gh pr view 29 --json state', null)).toBeNull()
+  expect(unsafeMerge('gh pr view 29 --json state', SHA)).toBeNull()
+  expect(runsPrMerge('gh pr view 29 --json state')).toBe(false)
 })
 
 test('unsafeMerge refuses gh api, curl and wget merges whose command word is quoted, escaped or continued', () => {
@@ -2747,7 +2779,7 @@ test('a refused gh api stdin merge leaves the approval and Ship it as they were,
 })
 
 // Every spelling Ship it refuses at the approved head commit or without it, as Claude or a helper would send it.
-const WORD_REFUSED = [...HIDDEN_MERGES, ...RUN_TIME_GH, ...UNKNOWN_GH, ...SPELLED_API, ...SPELLED_HTTP]
+const WORD_REFUSED = [...HIDDEN_MERGES, ...RUN_TIME_GH, ...UNKNOWN_GH, ...PR_FLAG_FIRST, ...SPELLED_API, ...SPELLED_HTTP]
 
 test('Ship it refuses merges Bash spells in other words from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
   const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')

@@ -758,6 +758,9 @@ const NO_API = 'Ship it merges only with gh pr merge --match-head-commit, never 
 const RUN_TIME =
   'While Ship it runs, a command and the first words of gh are never built at run time ($…, `…`, a glob, {a,b}, ~ or =). ' +
   'Spell them out.'
+const PR_FLAG_FIRST =
+  'While Ship it runs, gh pr takes its subcommand right after pr, never after a flag, which could hide a merge. ' +
+  'Put -R or --repo before pr and other flags after the subcommand.'
 const GH_ALIAS = 'While Ship it runs, gh runs only its own commands, never an alias or extension, which could hide a merge. Spell the gh command out.'
 const MERGE_WORDS =
   'Ship it merges only with gh pr merge, its own flags and at most one pull request. ' +
@@ -794,14 +797,15 @@ const baseName = (text: string) => text.slice(text.lastIndexOf('/') + 1)
 const wordClass = ({ text, isRunTime }: ShellWord) =>
   /^[A-Za-z_]\w*=/.test(text) ? 'A' : isRunTime ? 'X' : PREFIXES.has(text) ? 'P' : WRAPPERS.has(baseName(text)) ? 'W' : text.startsWith('-') ? 'O' : 'X'
 
-// The first two words gh reads as its command, past -R / --repo and other flags; null when one is built at run time.
+// The first two words gh reads as its command, past -R / --repo and other flags before the first; null when one is
+// built at run time. After pr the next word is kept as written, a flag too: its value count is never guessed.
 function ghCommand(args: ShellWord[]): string[] | null {
   const found: string[] = []
   let isPastFlags = false
   for (let at = 0; at < args.length && found.length < 2; at++) {
     const { text, isRunTime } = args[at]
     if (isRunTime) return null
-    if (isPastFlags || !text.startsWith('-') || text === '-') found.push(text)
+    if (isPastFlags || !text.startsWith('-') || text === '-' || found[0] === 'pr') found.push(text)
     else if (text === '--') isPastFlags = true
     else if (text === '-R' || text === '--repo') at++
   }
@@ -837,6 +841,9 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
         } else if (gh[0] === 'pr' && gh[1] === 'merge') {
           // Fails closed: gh pr merge anywhere else in a piece, even after echo, is read as a wrapped merge.
           found.push(!isWrapped && !isBody && at === 0 && word.text === 'gh' ? { merge: rest, isAlone: alone } : { refusal: DIRECT_ONLY })
+        } else if (gh[0] === 'pr' && gh[1]?.startsWith('-')) {
+          // Fails closed like a merge: a flag's value could stand where gh reads its subcommand.
+          found.push({ refusal: PR_FLAG_FIRST })
         } else if (gh[0] === 'api' && MERGE_ROUTE.test(command)) found.push({ refusal: NO_API })
         else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]) || (GH_EXTENSION.has(gh[0]) && gh[1] === 'exec'))) {
           found.push({ refusal: GH_ALIAS })
