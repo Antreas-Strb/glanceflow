@@ -855,7 +855,7 @@ const isLiteralEcho = (words: ShellWord[]) =>
 /**
  * Whether gh api graphql's query is not written out in the command, so the route check cannot read it: --input from a
  * file, -F / --field query=@file, a query field built at run time, or stdin that no heredoc, here-string with a written
- * word, or literal echo or printf piped in fills, or that a later < fills from a file. `args` follow api, `words` are the whole piece, `source` pipes into it.
+ * word, or literal echo or printf piped in fills, or that any < fills from a file. `args` follow api, `words` are the whole piece, `source` pipes into it.
  * shortcut: a heredoc's body is taken as written, even where an unquoted heredoc expands $… in it.
  */
 function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] | null): boolean {
@@ -894,11 +894,13 @@ function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] |
     }
   }
   if (!isStdin) return false
-  // Bash reads stdin from the last of the piece's redirects, past any pipe: a heredoc, a here-string, or < (0<, <>) from a file.
+  // Bash reads stdin from the last of the piece's redirects, past any pipe, but zsh's MULTIOS reads every one of them
+  // and the pipe too, so each must be written out: no < (0<, <>) from a file, no here-string built at run time, and no
+  // pipe but a literal echo or printf. A heredoc or here-string alone, with no pipe, fills stdin.
   // shortcut: a < on another descriptor, like 3< file, is read as stdin too.
-  const last = words.findLastIndex(word => word.isOperator && /^<(?:<-?|<<)?$/.test(word.text))
-  if (last >= 0) return words[last].text === '<' || (words[last].text === '<<<' && (words[last + 1]?.isRunTime ?? true))
-  return source === null || !isLiteralEcho(source)
+  if (words.some((word, at) => word.isOperator && (word.text === '<' || (word.text === '<<<' && (words[at + 1]?.isRunTime ?? true))))) return true
+  if (source !== null) return !isLiteralEcho(source)
+  return !words.some(word => word.isOperator && /^<<(?:-|<)?$/.test(word.text))
 }
 
 type WordFinding = { refusal: string } | { merge: ShellWord[]; isAlone: boolean }

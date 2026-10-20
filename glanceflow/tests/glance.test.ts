@@ -2559,12 +2559,21 @@ const HIDDEN_QUERIES = [
   'bash -c "gh api graphql --input body.json"',
   'gh -R me/site api graphql --input body.json',
   '"gh" api "graphql" --input body.json',
-  // Bash reads stdin from the last of its redirects, so a later < replaces a written heredoc, here-string or pipe.
+  // A < from a file feeds stdin whatever else does: Bash reads only the last redirect, and zsh's MULTIOS reads them all.
   `gh api graphql --input - <<'EOF' < q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
   `gh api graphql -F query=@- <<EOF 0< q.graphql\nquery { viewer { login } }\nEOF`,
   `gh api graphql --input - <<EOF <> q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
   `gh api graphql --input - <<< '{"query":"query { viewer { login } }"}' < q.graphql`,
   `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input - < q.graphql`,
+  // zsh's MULTIOS reads a < or a pipe before a written heredoc or here-string too, so they hide nothing behind it.
+  `gh api graphql --input - < q.graphql <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql -F query=@- 0< q.graphql <<EOF\nquery { viewer { login } }\nEOF`,
+  `gh api graphql --input - <> q.graphql <<EOF\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql --input - < q.graphql <<< '{"query":"query { viewer { login } }"}'`,
+  `cat q.graphql | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  `cat q.graphql | gh api graphql --input - <<< '{"query":"query { viewer { login } }"}'`,
+  `cat q.graphql | gh api graphql -F query=@- -f operationName=M <<'EOF'\nquery Q { viewer { login } }\nEOF`,
+  `gh api graphql -F query=@- -f operationName=M < merge.graphql <<'EOF'\nquery Q { viewer { login } }\nEOF`,
   // A quoted << is a word, not a heredoc.
   `cat q.graphql | gh api graphql --input - --jq '<<'`,
 ]
@@ -2625,9 +2634,8 @@ const ROUTE_HARMLESS = [
   `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
   `printf '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
   `gh api graphql -F query=@- <<'EOF'\nquery { viewer { login } }\nEOF`,
-  // A heredoc after the < or pipe is the last redirect, so it is what gh reads.
-  `gh api graphql --input - < q.graphql <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
-  `cat q.graphql | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  // A literal echo and a heredoc are both written out, however zsh joins them.
+  `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
   'gh api -X PATCH repos/me/site/pulls/12 --input body.json',
   'gh pr view 12 --json headRefOid,mergeable',
   'gh pr checks 12 --watch',
