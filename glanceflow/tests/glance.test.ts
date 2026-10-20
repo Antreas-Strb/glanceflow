@@ -2559,6 +2559,14 @@ const HIDDEN_QUERIES = [
   'bash -c "gh api graphql --input body.json"',
   'gh -R me/site api graphql --input body.json',
   '"gh" api "graphql" --input body.json',
+  // Bash reads stdin from the last of its redirects, so a later < replaces a written heredoc, here-string or pipe.
+  `gh api graphql --input - <<'EOF' < q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql -F query=@- <<EOF 0< q.graphql\nquery { viewer { login } }\nEOF`,
+  `gh api graphql --input - <<EOF <> q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql --input - <<< '{"query":"query { viewer { login } }"}' < q.graphql`,
+  `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input - < q.graphql`,
+  // A quoted << is a word, not a heredoc.
+  `cat q.graphql | gh api graphql --input - --jq '<<'`,
 ]
 // Code Bash runs from a here-string given to a shell, source or ., or from env -S: read like bash -c.
 const INLINE_MERGES = [
@@ -2583,6 +2591,15 @@ const INLINE_MERGES = [
   `env -uFOO -S 'gh pr merge 31 --admin'`,
   `env -iu FOO -S 'gh pr merge 31 --admin'`,
   `env -u FOO -u BAR -S 'gh pr merge 31 --admin'`,
+  // GNU env's -a, --unset, --chdir and --argv0 take the next word as their value too, and a long option may be cut short.
+  `env --unset X -S 'gh pr merge 32 --admin'`,
+  `env --chdir /tmp -S 'gh pr merge 32 --admin'`,
+  `env -a x -S 'gh pr merge 32 --admin'`,
+  `env -ia x -S 'gh pr merge 32 --admin'`,
+  `env --argv0 x -S 'gh pr merge 32 --admin'`,
+  `env --uns X --ch /tmp --arg x -S 'gh pr merge 32 --admin'`,
+  `env --split 'gh pr merge 32 --admin'`,
+  `env --s='gh pr merge 32 --admin'`,
   // env appends the words after the -S value to the split words it runs.
   `env -S 'gh pr' merge 31 --admin`,
   `env -S'gh pr' merge 31 --admin`,
@@ -2608,6 +2625,9 @@ const ROUTE_HARMLESS = [
   `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
   `printf '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
   `gh api graphql -F query=@- <<'EOF'\nquery { viewer { login } }\nEOF`,
+  // A heredoc after the < or pipe is the last redirect, so it is what gh reads.
+  `gh api graphql --input - < q.graphql <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  `cat q.graphql | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
   'gh api -X PATCH repos/me/site/pulls/12 --input body.json',
   'gh pr view 12 --json headRefOid,mergeable',
   'gh pr checks 12 --watch',
@@ -2617,6 +2637,7 @@ const ROUTE_HARMLESS = [
   'bash <<< "gh pr view 12"',
   'env -S "gh pr view 12"',
   'env -u FOO -S "gh pr view 12"',
+  'env --unset X -a x -S "gh pr view 12"',
   `env -S 'gh pr' view 31`,
   `env -S 'gh pr view' "$PR"`,
   'cat <<< "gh pr merge 12"',
@@ -3360,6 +3381,13 @@ const PS_TEXT: [string, string][] = [
   ['-Body "\\u00"6d"ergeBranch"', '-Body mergeBranch'],
   ['-Body \\x6dergeBranch', '-Body mergeBranch'],
   ['gh pr view 12', 'gh pr view 12'],
+  // PowerShell's own curly quotes join like ' and ": ‘ ’ ‚ ‛ and “ ” „; ‟, primes and fullwidth quotes are plain text.
+  ['gh pr me‘rge’ 12', 'gh pr merge 12'],
+  ['gh pr me‚rge‛ 12', 'gh pr merge 12'],
+  ['gh pr me“rge” 12', 'gh pr merge 12'],
+  ['gh pr me„rge“ 12', 'gh pr merge 12'],
+  ['g‘h’ pr merge 12', 'gh pr merge 12'],
+  ['gh pr view ‟12′ ＇12＂', 'gh pr view ‟12′ ＇12＂'],
 ]
 // PowerShell merges spelled with `u{…}, other escapes or quotes PowerShell joins: refused, approved or not.
 const PS_SPELLED = [
@@ -3371,6 +3399,12 @@ const PS_SPELLED = [
   `irm -Method Post https://api.github.com/graphql -Body '{"query":"mutation { \\u006dergePullRequest(input: {}) { clientMutationId } }"}'`,
   `iwr -Method Post https://api.github.com/graphql -Body '{"query":"mutation { \\x6dergeBranch(input: {}) { clientMutationId } }"}'`,
   'gh api graphql -f query="mutation { `u{65}nqueuePullRequest(input: {}) { clientMutationId } }"',
+  'gh pr me‘rge’ 32 --admin',
+  'gh pr me‚rge‛ 32 --admin',
+  'gh pr me“rge” 32 --admin',
+  'gh pr me„rge” 32 --admin',
+  'g‘h’ pr merge 32 --admin',
+  'g“h” pr merge 32 --admin',
 ]
 const PS_ALIAS = 'alias or extension'
 // gh in PowerShell with a first word that is not one of gh's own commands, past -R / --repo: refused, approved or not.
@@ -3388,9 +3422,10 @@ const PS_ALIASES = [
   'gh "m"m 12',
   "Start-Process gh -ArgumentList 'mm 12'",
   'gh extension exec mm 12',
+  'g‘h’ mm 12',
 ]
 // gh's own commands, and text with no gh: left alone.
-const PS_GH_HARMLESS = ['gh -R me/site pr view 12', 'gh --repo=me/site pr checks 12', 'gh --version', 'gh', 'gh auth status', 'gh pr view 12 --json "headRefOid"', 'git commit -m "Fix the footer"']
+const PS_GH_HARMLESS = ['gh -R me/site pr view 12', 'gh --repo=me/site pr checks 12', 'gh --version', 'gh', 'gh auth status', 'gh pr view 12 --json "headRefOid"', 'git commit -m "Fix the footer"', 'gh pr me‟rge‟ 12']
 
 test('unsafePowerShellMerge rebuilds spellings: `u{…}, escapes and quotes, and refuses gh aliases and extensions', () => {
   for (const [command, text] of PS_TEXT) expect([command, powerShellText(command)]).toEqual([command, text])

@@ -462,9 +462,9 @@ export function askedMergeSha(answer: string): string | null {
 
 /**
  * A word as Bash passes it on, and whether Bash builds it at run time: from $…, `…`, a glob, {a,b}, ~ or =. `runs`
- * holds the code of an unquoted $(…) or `…` in it, which Bash runs first.
+ * holds the code of an unquoted $(…) or `…` in it, which Bash runs first. `isOperator` marks an unquoted ( ) < > << <<- <<< or >>.
  */
-export type ShellWord = { text: string; isRunTime: boolean; runs?: string[] }
+export type ShellWord = { text: string; isRunTime: boolean; runs?: string[]; isOperator?: boolean }
 /** The words of one command, or of one line of a heredoc's body, and whether a | feeds it the piece before. */
 export type ShellPiece = { words: ShellWord[]; isBody: boolean; isPiped: boolean }
 
@@ -652,7 +652,7 @@ export function shellPieces(command: string): ShellPiece[] {
       const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
       const operator = command.startsWith('<<<', at) ? '<<<' : heredoc ? `<<${heredoc[1]}` : command.startsWith('>>', at) ? '>>' : char
       if (heredoc && operator !== '<<<') heredocs.push({ delimiter: heredoc[3], isTabbed: heredoc[1] === '-' })
-      words.push({ text: operator, isRunTime: false })
+      words.push({ text: operator, isRunTime: false, isOperator: true })
       at += operator.length - 1
     } else add(char)
   }
@@ -823,6 +823,11 @@ const WRAPPERS = new Set(['env', 'command', 'builtin', 'sudo', 'doas', 'exec', '
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
 const AT_COMMAND = /^(?:[PA]|W[WOX]*)*$/
 const baseName = (text: string) => text.slice(text.lastIndexOf('/') + 1)
+// Whether a word is one of GNU env's long options, which getopt also takes cut short (--uns for --unset), with or without =value.
+const isEnvLong = (text: string, ...names: string[]) => {
+  const long = /^--([^=]+)/.exec(text)
+  return long !== null && names.some(name => name.startsWith(long[1]))
+}
 const wordClass = ({ text, isRunTime }: ShellWord) =>
   /^[A-Za-z_]\w*=/.test(text) ? 'A' : isRunTime ? 'X' : PREFIXES.has(text) ? 'P' : WRAPPERS.has(baseName(text)) ? 'W' : text.startsWith('-') ? 'O' : 'X'
 
@@ -850,7 +855,7 @@ const isLiteralEcho = (words: ShellWord[]) =>
 /**
  * Whether gh api graphql's query is not written out in the command, so the route check cannot read it: --input from a
  * file, -F / --field query=@file, a query field built at run time, or stdin that no heredoc, here-string with a written
- * word, or literal echo or printf piped in fills. `args` follow api, `words` are the whole piece, `source` pipes into it.
+ * word, or literal echo or printf piped in fills, or that a later < fills from a file. `args` follow api, `words` are the whole piece, `source` pipes into it.
  * shortcut: a heredoc's body is taken as written, even where an unquoted heredoc expands $… in it.
  */
 function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] | null): boolean {
@@ -888,9 +893,11 @@ function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] |
       isStdin = true
     }
   }
-  if (!isStdin || words.some(word => word.text === '<<' || word.text === '<<-')) return false
-  const here = words.findIndex(word => word.text === '<<<')
-  if (here >= 0 && words[here + 1] !== undefined && !words[here + 1].isRunTime) return false
+  if (!isStdin) return false
+  // Bash reads stdin from the last of the piece's redirects, past any pipe: a heredoc, a here-string, or < (0<, <>) from a file.
+  // shortcut: a < on another descriptor, like 3< file, is read as stdin too.
+  const last = words.findLastIndex(word => word.isOperator && /^<(?:<-?|<<)?$/.test(word.text))
+  if (last >= 0) return words[last].text === '<' || (words[last].text === '<<<' && (words[last + 1]?.isRunTime ?? true))
   return source === null || !isLiteralEcho(source)
 }
 
@@ -935,18 +942,19 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
       } else if (!isCommand) {
         return
       } else if (WRAPPERS.has(name)) {
-        // The command a wrapper runs: its first word that is not an option or VAR=x. macOS env's -u, -C and -P
-        // (alone or last in -iu) take the next word as their value, and env reads its options past that word.
+        // The command a wrapper runs: its first word that is not an option or VAR=x. env's -u, -C, -P (macOS) and -a
+        // (GNU), alone or last in -iu, and GNU's --unset, --chdir and --argv0 without =, take the next word as their
+        // value, and env reads its options past that word.
         let run = 0
         for (; run < rest.length && /[OA]/.test(wordClass(rest[run])); run++) {
-          if (name === 'env' && /^-[^-uCPS]*[uCP]$/.test(rest[run].text)) run++
+          if (name === 'env' && (/^-[^-uCPSa]*[uCPa]$/.test(rest[run].text) || (isEnvLong(rest[run].text, 'unset', 'chdir', 'argv0') && !rest[run].text.includes('=')))) run++
         }
         if (rest[run]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
         // env -S / --split-string runs the words of its value, like bash -c.
-        const split = name === 'env' ? rest.slice(0, run).findIndex(one => /^(?:-[^-]*S|--split-string(?:=|$))/.test(one.text)) : -1
+        const split = name === 'env' ? rest.slice(0, run).findIndex(one => /^-[^-]*S/.test(one.text) || isEnvLong(one.text, 'split-string')) : -1
         if (split >= 0) {
           const text = rest[split].text
-          const code = text.startsWith('--') ? text.slice('--split-string='.length) : text.slice(text.indexOf('S') + 1)
+          const code = text.startsWith('--') ? text.slice(text.indexOf('=') + 1 || text.length) : text.slice(text.indexOf('S') + 1)
           // env appends the words after the value to the split words: written ones join quoted as they are, and one
           // built at run time as a quoted "$_", which reads as built at run time again.
           const after = rest.slice(split + (code ? 1 : 2)).map(one => (one.isRunTime ? '"$_"' : `'${one.text.replace(/'/g, `'\\''`)}'`))
@@ -1068,10 +1076,10 @@ const PS_MERGE = new RegExp(`merge|${MERGE_ROUTE.source}`, 'i')
 const PS_RUNNER = /(?<![\w-])(?:gh|invoke-restmethod|irm|invoke-webrequest|iwr|curl|wget)(?:\.exe)?(?![\w-])|api\.github\.com|graphql/i
 
 /**
- * A PowerShell command as the guard reads it: `u{…} decoded, then backticks and both quote characters dropped, so
- * escaped or quoted pieces join the way PowerShell joins them, then the other escapes decoded.
+ * A PowerShell command as the guard reads it: `u{…} decoded, then backticks and the quote characters PowerShell reads
+ * (' ‘ ’ ‚ ‛ and " “ ” „) dropped, so escaped or quoted pieces join the way PowerShell joins them, then the other escapes decoded.
  */
-export const powerShellText = (command: string) => decodeEscapes(command.replace(PS_UNICODE, character).replace(/[`'"]/g, ''))
+export const powerShellText = (command: string) => decodeEscapes(command.replace(PS_UNICODE, character).replace(/[`'"‘’‚‛“”„]/g, ''))
 
 // gh's first word in PowerShell text, past -R / --repo and other flags: not one of gh's own commands, or extension exec.
 // shortcut: reads every gh word in the text, so gh followed by another word in a message is refused too.
