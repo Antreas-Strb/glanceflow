@@ -4988,3 +4988,53 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
 })
+
+test("notices go through Claude Code first, so the person's Notification hooks reach them away from the computer", async ($, on) => {
+  const { clock } = soundWorld(on)
+  on('classic.StopFailure', () => ({}) as never)
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    ran.push((e as { argv: readonly string[] }).argv[0] ?? '')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  const notified: { text: string; title?: string }[] = []
+  let answer: unknown = { isSent: true, channel: 'iterm2' }
+  on('ui.notify', (_, e) => {
+    notified.push({ text: e.text, title: e.title })
+    return { value: answer } as never
+  })
+  await $.command.run({ command: 'glanceflow', args: 'notify on' } as never)
+  await clock.advance(1)
+  notified.length = 0
+  ran.length = 0
+
+  // Claude Code's channel showed it (and the hooks ran): no second notice from the computer.
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write it', 'Check it'] })
+  await $.classic.StopFailure({ error: 'overloaded_error', error_details: '' } as never)
+  await clock.advance(1)
+  expect(notified.map(one => one.title)).toEqual(['Claude is stuck'])
+  expect(notified[0]?.text).toBeTruthy()
+  expect(ran.filter(one => one === 'osascript' || one === 'notify-send')).toEqual([])
+
+  // No text where the person looks (the Desktop app, a bare bell): the computer's own notice shows it too.
+  for (const reply of [{ isSent: false, reason: 'no-surface' }, { isSent: true, channel: 'terminal_bell' }]) {
+    answer = reply
+    notified.length = 0
+    ran.length = 0
+    await $.turn.start({ text: 'Try again', turnId: `t-${notified.length}-${String(reply.isSent)}` })
+    await callTool($, { tool: PLAN, steps: ['Write it'] })
+    await $.classic.Notification({ message: 'Claude needs your permission', notification_type: 'permission_prompt' } as never)
+    await clock.advance(1)
+    expect(notified.map(one => one.title)).toEqual(['Claude needs you'])
+    expect(ran).toContain('osascript')
+  }
+
+  // Claude Code hears a mod's notice again as a plugin_notification: that is not Claude needing the person.
+  notified.length = 0
+  await $.turn.start({ text: 'One more', turnId: 't9' })
+  await callTool($, { tool: PLAN, steps: ['Write it'] })
+  await $.classic.Notification({ message: 'Claude is stuck', notification_type: 'plugin_notification' } as never)
+  await clock.advance(1)
+  expect(notified).toEqual([])
+})

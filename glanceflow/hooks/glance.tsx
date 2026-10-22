@@ -444,8 +444,14 @@ const WINDOWS_TOAST = [
   "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($xml))",
 ].join('; ')
 
-/** A desktop notice through the computer's own notifications: Windows, macOS or Linux. The text goes in as arguments or variables, never as script. */
+/**
+ * A notice, first through Claude Code: the person's own Notification hooks read it (a phone, ntfy, Slack), then their
+ * terminal shows it. Where that shows no text (the Desktop app, no channel, only a bell), the computer's own notifications
+ * show it: Windows, macOS or Linux. The text goes in as arguments or variables, never as script.
+ */
 const showNotice = async ($: $, title: string, body: string) => {
+  const sent = await $.ui.notify(body, { title }).catch(() => null)
+  if (sent?.isSent && sent.channel !== 'terminal_bell') return
   if (platform === 'windows') {
     await $.process
       .run(['powershell', '-NoProfile', '-Command', WINDOWS_TOAST], { env: { GLANCEFLOW_TITLE: title, GLANCEFLOW_BODY: body } })
@@ -1507,7 +1513,7 @@ export function registerGlance(on: On): void {
       await setNotice($, isOn)
       return {
         text: isOn
-          ? 'Desktop notices are on: your computer tells you when Claude needs you, gets stuck or finishes a long job.'
+          ? 'Desktop notices are on: your computer, and any Notification hooks you set up for Claude Code, tell you when Claude needs you, gets stuck or finishes a long job.'
           : 'Desktop notices are off.',
       }
     }
@@ -2366,8 +2372,8 @@ export function registerGlance(on: On): void {
           isNoticing ? 'On' : 'Off',
           choice('notice', [['off', 'Off'], ['on', 'On']], isNoticing ? 'on' : 'off', value => setNotice($, value === 'on')),
           isNoticing
-            ? 'A notice on your computer when Claude needs you, gets stuck, or finishes a job that took over a minute.'
-            : 'Turn on to get a notice on your computer, even while you work in another app.',
+            ? 'A notice when Claude needs you, gets stuck, or finishes a job that took over a minute: on your computer, and through your Claude Code Notification hooks, such as one that reaches your phone.'
+            : 'Turn on to get a notice on your computer, even while you work in another app, or on your phone through your Claude Code Notification hooks.',
         )}
         {group(
           'others',
