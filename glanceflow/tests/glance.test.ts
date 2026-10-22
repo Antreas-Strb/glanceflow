@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -4034,6 +4034,68 @@ test('each step shows the files Claude added or changed, in the Plan and in Hist
   ).toBe('Changed app/page.tsx, pricing/page.tsx, a.css, b.css and 1 more')
   expect(filesNote([{ path: 'notes.md', isNew: true }])).toBe('Added notes.md')
   expect(filesNote([])).toBe('')
+})
+
+test('a check command is a test, build or type check that runs, not one that is only mentioned', () => {
+  for (const command of ['npm test', 'cd x && pnpm run build', 'CI=1 npx vitest run', 'go test ./...', 'npm test 2>&1 | tail -5', 'claude plugin test glanceflow'])
+    expect(runsCheck(command)).toBe(true)
+  for (const command of ['git commit -m "fix test"', 'cat tests/a.ts', 'npm install jest', 'echo npm test', 'ls'])
+    expect(runsCheck(command)).toBe(false)
+
+  expect(checkResult(true, '')).toBe('failed')
+  // Piped through tail, the exit code is tail's: the output tells.
+  expect(checkResult(false, 'Tests: 3 failed, 12 passed')).toBe('failed')
+  expect(checkResult(false, 'src/a.ts(3,1): error TS2304: Cannot find name')).toBe('failed')
+  expect(checkResult(false, ' 203 pass\n 0 fail')).toBe('passed')
+  expect(needsCheck('README.md')).toBe(false)
+  expect(needsCheck('src/a.ts')).toBe(true)
+
+  const step = (check?: 'passed' | 'failed' | 'unchecked') => ({ ...carryTokens([], [])[0], id: String(check), check }) as never
+  const checked = applyCheck([step(), step('passed'), step('unchecked')], 'failed')
+  expect(checked.map(one => one.check)).toEqual([undefined, 'passed', 'failed'])
+  expect(jobCheck(checked)).toBe('failed')
+  expect(jobCheck([step(), step('passed')])).toBe('passed')
+  expect(jobCheck([step()])).toBeNull()
+})
+
+test('a finished job says whether the code it changed was tested, by the tests run, not by Claude', async ($, on) => {
+  // What the shell answers; every other tool succeeds.
+  let answer: unknown = { result: {}, text: ' 203 pass\n 0 fail' }
+  world(on, ((_: unknown, e: { tool: string }) => (e.tool === 'Bash' ? answer : { result: {} })) as never)
+  let turn = 0
+  const job = async (work: () => Promise<unknown>) => {
+    turn += 1
+    await $.turn.start({ text: `Fix the sign-up bug ${turn}`, turnId: `t${turn}` })
+    await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+    await work()
+    await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+    await callTool($, { tool: PROGRESS, task: 'Check it', percent: 100 })
+    await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: `t${turn}`, reason: 'answer' })
+    return (await texts($, 'terminal')).find(line => line.startsWith('✓ All done')) ?? ''
+  }
+  const edit = (path: string) => callTool($, { tool: 'Edit', file_path: path, old_string: 'a', new_string: 'b' })
+  const bash = (command: string) => callTool($, { tool: 'Bash', command })
+
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toMatch(/ · tested · took /)
+  // An edit after the tests passed is untested again.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test'), await edit('/work/src/a.ts')))).toContain(' · not tested · ')
+  // A command that only mentions tests checks nothing.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('git commit -m "fix test"')))).toContain(' · not tested · ')
+  answer = { isError: true, result: 'x', text: '1 failed' }
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toContain(' · tests failed · ')
+  // Prose needs no test.
+  answer = { result: {}, text: '' }
+  const prose = await job(() => edit('/work/README.md'))
+  expect(prose).toContain('✓ All done')
+  expect(prose).not.toMatch(/tested|tests failed/)
+  // The person saying no at the permission dialog says nothing about the code; the Plan shows each step's check.
+  answer = { isError: true, result: 'x', text: "The user doesn't want to proceed with this tool use." }
+  await $.turn.start({ text: 'Fix the login bug', turnId: 'tn' })
+  await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+  await edit('/work/src/a.ts')
+  await bash('npm test')
+  await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+  expect(await planPaneTexts($)).toContain(' took 0s · not tested')
 })
 
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */

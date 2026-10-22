@@ -22,7 +22,12 @@ export type GlanceTask = {
   finishedAt: number | null
   /** Files Claude wrote or edited during the step; absent on steps saved before 0.20. */
   files?: GlanceFile[]
+  /** Whether a test, build or type check passed after the step last changed code; absent while it changed none. */
+  check?: GlanceCheck
 }
+
+/** A step's code: checked by a test, build or type check that passed, one that failed, or not checked since it changed. */
+export type GlanceCheck = 'passed' | 'failed' | 'unchecked'
 
 /** A file Claude wrote or edited: its path within the project (just its name outside it), and whether the step created it. */
 export type GlanceFile = { path: string; isNew: boolean }
@@ -91,6 +96,10 @@ export type GlanceChecklist = {
   costAtStart: number | null
   /** How long one unit of step size took in this project's earlier finished jobs, in ms; null until History knows. */
   paceMs: number | null
+  /** What will be true when the job is done, and what will show it, as Claude said in its plan. */
+  doneWhen?: string | null
+  /** The person's standing goal for this project when the job started (`/glanceflow goal`). */
+  goal?: string | null
 }
 
 /** One plan window and how much of it is used. */
@@ -156,6 +165,10 @@ export type GlanceHistoryEntry = {
   /** Size units of the steps it checked off (S 1, M 2, L 3), and the time they took in ms: the project's pace. */
   doneUnits?: number
   doneMs?: number
+  /** Whether the code it changed was checked: the worst of its steps; absent when it changed no code. */
+  check?: GlanceCheck | null
+  doneWhen?: string | null
+  goal?: string | null
 }
 
 /** What the history pane shows: one day of one project. */

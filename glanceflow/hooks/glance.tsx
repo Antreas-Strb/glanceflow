@@ -37,6 +37,7 @@ import {
 import { findSecrets, maskPrivate } from './privacy'
 import {
   MAX_DETAIL,
+  CHECK_WORDS,
   MAX_NAME,
   PLUGIN,
   QUESTION,
@@ -45,10 +46,12 @@ import {
   activityOf,
   activityTarget,
   apiErrorSentence,
+  applyCheck,
   applyProgress,
   askedMergeSha,
   asksQuestion,
   carryTokens,
+  checkResult,
   cleanName,
   currentStepId,
   durationWords,
@@ -64,10 +67,12 @@ import {
   isLatinText,
   isMcpMergeAction,
   isStartWords,
+  jobCheck,
   jobCost,
   leftLabel,
   liftButtons,
   localTimes,
+  needsCheck,
   needsText,
   noticeBody,
   otherChats,
@@ -80,6 +85,7 @@ import {
   reconcileBackground,
   reportOf,
   resetTime,
+  runsCheck,
   sentenceCase,
   sizeOf,
   stampTimes,
@@ -251,13 +257,16 @@ The person follows your work on a checklist above the prompt, in plain English.
 - Give each step a size in plan_steps' sizes list, in the same order: S (a few minutes), M, or L (the biggest pieces of work).
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
 - Write every step name in plain English a non-technical person understands, under 40 characters, starting with a verb, like "Build the pricing section".
-- Never put file paths, file names, commands, code or tool names in a step name.`
+- Never put file paths, file names, commands, code or tool names in a step name.
+- When the job changes code, make the last step check the work by running the project's tests, build or type check, rather than saying it passed. The checklist shows whether changed code was tested.`
 
 const SPINNER = ['◐', '◓', '◑', '◒']
 const HELPERS_PER_STEP = 3
 
 // The tools that write files, and the field each names the file in.
 const FILE_TOOLS: Record<string, 'file_path' | 'notebook_path'> = { Write: 'file_path', Edit: 'file_path', MultiEdit: 'file_path', NotebookEdit: 'notebook_path' }
+// What a tool call's error says when the person said no at the permission dialog.
+const REJECTED = /doesn't want to proceed|user (has )?(rejected|denied|declined)/i
 
 type $ = EngineInterface
 
@@ -659,18 +668,29 @@ const setNeedsYou = ($: $, reason: string) =>
     list.phase === 'done' || list.phase === 'stopped' ? list : { ...list, phase: 'needsYou', needsYouReason: reason, question: null },
   )
 
-/** Claude wrote or edited a file: the current step keeps it, created or changed, once. */
+/** Claude wrote or edited a file: the current step keeps it, created or changed, once. A code change is untested again. */
 const noteFile = async ($: $, path: string, isNew: boolean) => {
   const file: GlanceFile = { path: projectPath(path, await $.session.cwd().catch(() => '')), isNew }
   await change($, list => {
     const stepId = currentStepId(list)
     return {
       ...list,
-      tasks: list.tasks.map(one =>
-        one.id !== stepId || (one.files ?? []).some(known => known.path === file.path) ? one : { ...one, files: [...(one.files ?? []), file] },
-      ),
+      tasks: list.tasks.map(one => {
+        if (one.id !== stepId) return one
+        const files = (one.files ?? []).some(known => known.path === file.path) ? one.files : [...(one.files ?? []), file]
+        return needsCheck(path) ? { ...one, files, check: 'unchecked' } : { ...one, files }
+      }),
     }
   })
+}
+
+// A test, build or type check Claude ran: its result marks the steps that changed code. A run the person rejected or
+// interrupted says nothing about the code.
+const noteCheck = async ($: $, tool: string, input: { command?: unknown }, ran: { deny?: string; isError?: boolean; text?: unknown }) => {
+  if ((tool !== 'Bash' && tool !== 'PowerShell') || ran.deny || !runsCheck(String(input.command ?? ''))) return
+  const text = String(ran.text ?? '')
+  if (ran.isError && (REJECTED.test(text) || /\binterrupted\b/i.test(text))) return
+  await change($, list => ({ ...list, tasks: applyCheck(list.tasks, checkResult(ran.isError === true, text)) }))
 }
 
 const setStuck = ($: $, reason: string) =>
@@ -1766,6 +1786,7 @@ export function registerGlance(on: On): void {
       if (isMerging) approvedSha = null
       const ran = await next(e)
       if (isMerging) noteMerge(ran)
+      await noteCheck($, tool, e as unknown as { command?: unknown }, ran)
       if (filePath !== '' && ran.deny === undefined && !ran.isError) {
         await noteFile($, filePath, isNewFile)
       }
@@ -1818,12 +1839,13 @@ export function registerGlance(on: On): void {
       return ran
     }
     // The person said no at the permission dialog.
-    if (ran.isError && /doesn't want to proceed|user (has )?(rejected|denied|declined)/i.test(String(ran.text ?? ''))) {
+    if (ran.isError && REJECTED.test(String(ran.text ?? ''))) {
       failuresInARow = 0
       await setStuck($, DENIED)
 
       return ran
     }
+    await noteCheck($, tool, e as unknown as { command?: unknown }, ran)
     if (ran.isError) {
       failuresInARow += 1
       if (failuresInARow >= 3) {
@@ -2480,7 +2502,7 @@ export function registerGlance(on: On): void {
         // Under the Done heading a time says how long it took; the terminal, with no heading in the column, says so.
         const took = ms === null ? (vector ? '' : 'done') : vector ? (ms < 1000 ? '' : durationWords(ms)) : `took ${formatDuration(ms)}`
         done.push(
-          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', 'Done') }, one.name, {}, [took, tokensOf(one)].filter(Boolean).join(' · ')),
+          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', 'Done') }, one.name, {}, [took, one.check ? CHECK_WORDS[one.check] : '', tokensOf(one)].filter(Boolean).join(' · ')),
           ...(one.summary ? [note(`${key}-summary`, one.summary)] : []),
           ...filesOf(key, one),
           ...helperRows(one),
@@ -3373,11 +3395,17 @@ export function registerGlance(on: On): void {
         </Text>
       )
     } else if (list.phase === 'done') {
+      // Whether the code the job changed was tested: outside proof, not Claude's own word.
+      const check = jobCheck(list.tasks)
+      const checkWords = check === null ? '' : CHECK_WORDS[check]
       header = vector ? (
-        headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, `took ${elapsed}`, jobTokenNote])
+        headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, checkWords, `took ${elapsed}`, jobTokenNote])
       ) : (
         <Text wrap="truncate-end" color="green" bold={isCalm}>
-          {fit(`✓ All done · ${list.title} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`, headerWidth).trimEnd()}
+          {fit(
+            `✓ All done · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
+            headerWidth,
+          ).trimEnd()}
         </Text>
       )
     } else {
