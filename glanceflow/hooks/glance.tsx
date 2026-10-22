@@ -265,7 +265,7 @@ The person follows your work on a checklist above the prompt, in plain English.
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
 - Write every step name in plain English a non-technical person understands, under 40 characters, starting with a verb, like "Build the pricing section".
 - Never put file paths, file names, commands, code or tool names in a step name.
-- When the job changes code, make the last step check the work by running the project's tests, build or type check, rather than saying it passed. The checklist shows whether changed code was tested.`
+- Fill in plan_steps' done_when: what will be true when the job is done, and what other than you will show it. Make the last step that check. When the job changes code, run the project's tests, build or type check rather than saying it passed. The checklist shows whether changed code was tested.`
 
 const SPINNER = ['◐', '◓', '◑', '◒']
 const HELPERS_PER_STEP = 3
@@ -627,6 +627,7 @@ const startJob = async ($: $, text: string, jobId: string) => {
     approval: 'none',
     costAtStart: (await read($, usageAtom)).costUsd,
     paceMs: await learnPace($),
+    doneWhen: null,
     // Work still running from the last job stays in view.
     helpers: (previous?.helpers ?? []).filter(one => one.status === 'running'),
   }
@@ -1307,6 +1308,12 @@ export function registerGlance(on: On): void {
             items: { type: 'string', enum: ['S', 'M', 'L'] },
             description: 'One size per step, in order: S small, M medium, L large.',
           },
+          done_when: {
+            type: 'string',
+            description:
+              'What will be true when the job is done, and what other than you will show it: tests passing, the page ' +
+              'loading on a phone, the person trying it. One plain-English sentence, no file names or code.',
+          },
         },
         required: ['steps'],
       },
@@ -1710,8 +1717,9 @@ export function registerGlance(on: On): void {
     const isNewFile = filePath !== '' && tool === 'Write' && !(await $.fs.exists(filePath).catch(() => true))
 
     if (tool === PLAN_TOOL) {
-      const input = e as unknown as { steps?: unknown; sizes?: unknown }
+      const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown }
       const steps = (Array.isArray(input.steps) ? input.steps : []).map(one => cleanName(one)).slice(0, 8)
+      const doneWhen = String(input.done_when ?? '').trim() ? cleanName(input.done_when, MAX_SUMMARY) : null
       const sizes = Array.isArray(input.sizes) ? input.sizes : []
       if (steps.length === 0) {
         return { deny: 'plan_steps needs 2 to 8 step names.' }
@@ -1741,6 +1749,8 @@ export function registerGlance(on: On): void {
         hasPlan: true,
         tasks: stampTimes(carryTokens(list?.tasks ?? [], tasks), started),
         helpers: list?.helpers ?? [],
+        // A new plan without it keeps the one said before.
+        doneWhen: doneWhen ?? list?.doneWhen ?? null,
       }))
       syncTicker($, await read($, checklistAtom))
       saveSoon($)
@@ -2605,6 +2615,11 @@ export function registerGlance(on: On): void {
         <Text dimColor wrap="wrap">
           {when}
         </Text>
+        {list.doneWhen && (
+          <Text key="done-when" wrap="wrap">
+            {`Done when: ${list.doneWhen}`}
+          </Text>
+        )}
         {vector ? (
           <Box key="progress" flexDirection="row" alignItems="center" gap={1} marginTop={1}>
             <Box flexShrink={0}>{kit.meter(isDone ? 'ok' : 'active', percent, 0, `${percent}% done`, 160)}</Box>

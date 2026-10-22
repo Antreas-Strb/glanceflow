@@ -114,6 +114,7 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     doneUnits: timed.reduce((sum, one) => sum + SIZE_WEIGHT[one.size], 0),
     doneMs: timed.reduce((sum, one) => sum + (one.finishedAt! - one.startedAt!), 0),
     check: jobCheck(list.tasks),
+    doneWhen: list.doneWhen ?? null,
   }
 }
 
@@ -239,6 +240,7 @@ export function teamReport(
     lines.push('Done')
     for (const one of done) {
       lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${CHECK_WORDS[one.check]}` : ''}`)
+      if (one.doneWhen) lines.push(`  Done when: ${one.doneWhen}`)
       const notes = one.doneNotes ?? []
       if (notes.some(Boolean)) {
         // What each step got done, in Claude's words where it gave them.

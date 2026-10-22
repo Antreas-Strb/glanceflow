@@ -4130,6 +4130,34 @@ test('a finished job says whether the code it changed was tested, by the tests r
   expect(await planPaneTexts($)).toContain(' took 0s · not tested')
 })
 
+test('a plan says what done looks like, in the Plan and in the Team report, beside whether it was tested', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  const doneWhen = 'The sign-up tests pass and the form works on a phone'
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'], done_when: doneWhen })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+  // A new plan that leaves it out keeps it.
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests', 'Try it on a phone'] })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests', 'Try it on a phone']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/• Fix the sign-up form \(.*\) · tested\n  Done when: The sign-up tests pass and the form works on a phone\n/)
+})
+
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */
 function resumeWorld(on: On, entries: Record<string, unknown> = {}, failsToDelete = false) {
   const clock = mock.clock(on, { now: 1_000_000 })
