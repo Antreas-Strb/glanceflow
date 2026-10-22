@@ -217,6 +217,13 @@ const HANDOFF_CONFIRM_MS = 8000
 const CONTINUE_TEXT = 'Please continue where you left off.'
 // What the Start button sends when the person approves the plan.
 const START_TEXT = 'The plan looks good. Please start.'
+// What Aim higher sends while a plan waits: a deeper job, not a bigger one, from Felix Rieseberg's depth prompt.
+// Not start words, so the job stays and the new plan waits for Start again.
+const AIM_TEXT =
+  'Aim higher: I want a deeper version of this job, not a bigger one. Before you change the plan, say briefly ' +
+  '(1) what a top professional in this field would do here that I didn\'t ask for; (2) the rawest material they would ' +
+  'start from instead of what has already been digested; (3) the methods and tools they would use; (4) what, other ' +
+  'than you or me, would show the result is right. Then lay out the new plan with plan_steps, with done_when naming that check.'
 const HANDOFF_PROMPT = `Write a handoff note so a brand-new chat can carry on this work without this conversation.
 Cover, briefly: the goal; what is already done; what is left, in order; decisions made and why; the files, commands
 or links that matter; and the very next step. Under 300 words, no preamble.
@@ -1098,6 +1105,7 @@ const holdForApproval = async ($: $): Promise<boolean> => {
 
 /** The person approves the plan: the same job starts. */
 const startPlan = ($: $) => sendAsUser($, START_TEXT, () => $.ui.toast("Couldn't start right now. Type: start"))
+const aimHigher = ($: $) => sendAsUser($, AIM_TEXT, () => $.ui.toast("Couldn't send that right now. Ask Claude for a deeper plan."))
 
 /** Picks Simple, Details or Off directly, as the settings panel does. */
 const setView = async ($: $, view: 'simple' | 'detailed' | 'off') => {
@@ -3009,6 +3017,7 @@ export function registerGlance(on: On): void {
     const controls = isEnabled
       ? [
           canPause && action('pause', 'pause', pauseLabel, () => pauseJob($)),
+          list0?.approval === 'waiting' && action('aim', 'spark', 'Aim higher', () => aimHigher($)),
           list0?.approval === 'waiting' && action('start', 'play', 'Start', () => startPlan($), undefined, true),
           canContinue && action('continue', 'play', continueLabel, () => continueJob($), undefined, !(vector && isLimitStuck)),
         ].filter(Boolean)

@@ -3981,6 +3981,38 @@ test('with Approve the plan first on, Claude waits for Start before it works', a
   expect(shown).toContain('Write the page')
 })
 
+test('Aim higher asks Claude for a deeper plan, and the new plan still waits for Start', async ($, on) => {
+  world(on)
+  let sent = ''
+  on('prompt.submit', (_, e) => {
+    sent = e.text
+    return { text: e.text }
+  })
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('✦ Aim higher')
+  // Start stays the main button, and last.
+  const buttons = (await texts($, 'desktop')).filter(one => one === 'Aim higher' || one === 'Start')
+  expect(buttons).toEqual(['Aim higher', 'Start'])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'aim' })
+  await ui.unmount()
+  expect(sent).toStartWith('Aim higher: I want a deeper version of this job, not a bigger one.')
+  expect(sent).toContain('done_when')
+
+  // The same job goes on; Claude's new plan waits for Start again.
+  await $.turn.start({ text: sent, turnId: 't2' })
+  const replanned = await callTool($, { tool: PLAN, steps: ['Read the raw analytics', 'Write the page', 'Test it on a phone'] })
+  expect(String(replanned.result)).toContain('wait for their reply')
+  expect((await callTool($, { tool: 'Bash', command: 'ls' })).deny).toContain('not approved')
+  expect((await texts($, 'terminal')).join('\n')).toContain('▶ Start')
+  // Same job: the plan grew rather than started over.
+  expect(await planPaneTexts($)).toContain('plan grew 2 → 3')
+})
+
 test('with Approve the plan first on, a plan Claude makes with its own task list also waits for Start', async ($, on) => {
   world(on)
   await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
