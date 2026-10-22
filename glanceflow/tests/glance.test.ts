@@ -5253,3 +5253,26 @@ test("while a command waits for permission, the band says what it asks and what'
   release()
   await running
 })
+
+test('in a narrow band a long permission request gets its own line, so its risk words are never cut off', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the page', 'Publish the site'] })
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  const words = 'OK to publish the site? It deletes files and deploys online.'
+  for (const surface of SURFACES) {
+    // About an 80-column terminal, and a narrow chat in the Desktop app.
+    const shown = await texts($, surface, surface === 'terminal' ? 78 : 60)
+    expect(shown).toContain(words)
+    expect(shown.some(one => one.includes('Needs you'))).toBe(true)
+    expect(shown.join('\n')).not.toContain('It…')
+  }
+})
