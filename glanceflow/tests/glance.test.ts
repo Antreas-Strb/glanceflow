@@ -4988,3 +4988,36 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
 })
+
+test("in plan mode the plan the person approves in Claude Code is the checklist, with no plan of the planning and no second approval", async ($, on) => {
+  world(on)
+  on('classic.UserPromptSubmit', () => ({}) as never)
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'Add a subtract function', permission_mode: 'plan' } as never)
+  await $.turn.start({ text: 'Add a subtract function', turnId: 't1' })
+
+  // Claude looks around and writes the plan, with no checklist of the planning itself.
+  const looked = await callTool($, { tool: 'Read', file_path: '/work/calc.py' })
+  expect(looked.deny).toBeUndefined()
+  const meta = await callTool($, { tool: PLAN, steps: ['Look at the code', 'Write the plan'] })
+  expect(meta.deny).toContain('Plan mode')
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('Look at the code')
+
+  // The person approves the plan in Claude Code: its steps become the checklist, and the work starts at once.
+  const handed = await callTool($, { tool: 'ExitPlanMode' })
+  expect(handed.deny).toBeUndefined()
+  const planned = await callTool($, { tool: PLAN, steps: ['Add the subtract function', 'Test both functions'] })
+  expect(String(planned.result)).not.toContain('wait for their reply')
+  const ran = await callTool($, { tool: 'Edit', file_path: '/work/calc.py', old_string: 'a', new_string: 'b' })
+  expect(ran.deny).toBeUndefined()
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('Add the subtract function')
+  expect(shown).not.toContain('▶ Start')
+
+  // The next prompt, out of plan mode, plans and waits for Start as before.
+  await $.classic.UserPromptSubmit({ prompt: 'Now a multiply function', permission_mode: 'default' } as never)
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Now a multiply function', turnId: 't2' })
+  const next = await callTool($, { tool: PLAN, steps: ['Add multiply', 'Test it'] })
+  expect(String(next.result)).toContain('wait for their reply')
+})

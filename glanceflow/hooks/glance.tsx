@@ -123,6 +123,8 @@ const ALWAYS_ALLOWED = new Set([
   'TaskCreate',
   'TaskUpdate',
   'AskUserQuestion',
+  // Claude Code's own plan approval, in plan mode.
+  'ExitPlanMode',
   PLAN_TOOL,
   PROGRESS_TOOL,
 ])
@@ -176,6 +178,7 @@ const RESUME_KEEP = 20
 const LIMIT_LABEL: Record<string, string> = { five_hour: '5-hour', seven_day: 'weekly', spend_limit: 'spending' }
 
 const DENIED = 'you said no to a step, so Claude paused'
+const PLAN_MODE_WAIT = `Plan mode: write the plan and hand it over for approval first. Once the person approves it, call ${PLAN_TOOL} with that plan's own steps, then do the work.`
 const FAILING = 'a step keeps failing, Claude is trying another way'
 const STALLED = 'no news for 3 minutes. Press Esc to stop Claude, or give it a little longer'
 // No sign of life from Claude (a piece of its reply, a tool starting or ending) for this long while it works.
@@ -267,6 +270,7 @@ const PROMPT_SECTION = `# GlanceFlow (progress checklist)
 The person follows your work on a checklist above the prompt, in plain English.
 - A question you can answer straight away, with no tools, needs no plan: just answer.
 - Before you use any other tool, call plan_steps (tool ${PLAN_TOOL}) with 2 to 8 steps in order. If it is deferred, load it with ToolSearch first. If this session has TodoWrite or TaskCreate you may use that to-do list as the plan instead.
+- In plan mode, skip plan_steps while you look around and write the plan. Once the person approves it, call plan_steps with that plan's own steps, then do the work.
 - Give each step a size in plan_steps' sizes list, in the same order: S (a few minutes), M, or L (the biggest pieces of work).
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
 - Write every step name in plain English a non-technical person understands, under 40 characters, starting with a verb, like "Build the pricing section".
@@ -308,6 +312,10 @@ let approvedSha: string | null = null
 let isShipTurnNext = false
 let hasFailedMerge = false
 let isDeclining = false
+// Plan mode: Claude writes a plan for the person to approve in Claude Code. Once they approve it, that plan is the
+// checklist, with no second approval.
+let isPlanMode = false
+let isPlanApproved = false
 
 /** Ship it is over in this chat: its merge guard no longer applies. */
 const endShipping = () => {
@@ -1138,7 +1146,8 @@ const setApprove = async ($: $, isOn: boolean) => {
 
 /** With Approve the plan first on, a new plan waits for Start or a change; true when it now waits. */
 const holdForApproval = async ($: $): Promise<boolean> => {
-  if (!(await read($, approveAtom)) || (await read($, checklistAtom))?.approval === 'approved') {
+  // A plan the person approved in plan mode needs no second approval.
+  if (isPlanApproved || !(await read($, approveAtom)) || (await read($, checklistAtom))?.approval === 'approved') {
     return false
   }
   await change($, list => ({ ...list, approval: 'waiting', phase: 'needsYou', needsYouReason: APPROVE }))
@@ -1864,6 +1873,10 @@ export function registerGlance(on: On): void {
     // Only Write can create a file; asked before it runs.
     const isNewFile = filePath !== '' && tool === 'Write' && !(await $.fs.exists(filePath).catch(() => true))
 
+    // In plan mode the plan Claude hands over for approval is the plan: no checklist of the planning itself.
+    if (tool === PLAN_TOOL && isPlanMode && (await read($, enabledAtom))) {
+      return { deny: PLAN_MODE_WAIT }
+    }
     if (tool === PLAN_TOOL) {
       const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown }
       const steps = (Array.isArray(input.steps) ? input.steps : []).map(one => cleanName(one)).slice(0, 8)
@@ -1964,7 +1977,7 @@ export function registerGlance(on: On): void {
 
     const isEnabled = await read($, enabledAtom)
     const list = await read($, checklistAtom)
-    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan) {
+    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !isPlanMode) {
       return {
         deny: `Call ${PLAN_TOOL} first to lay out the plan in plain English (load it with ToolSearch if it is deferred), then try again.`,
       }
@@ -2029,7 +2042,10 @@ export function registerGlance(on: On): void {
       await noteFile($, filePath, isNewFile)
     }
 
-    if (tool === 'TodoWrite' && call.todos) {
+    if (tool === 'ExitPlanMode') {
+      isPlanMode = false
+      isPlanApproved = true
+    } else if (tool === 'TodoWrite' && call.todos) {
       const todos = call.todos
       const planned = await now($)
       await change($, current => ({
@@ -2088,6 +2104,13 @@ export function registerGlance(on: On): void {
     }
 
     return ran
+  })
+
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    isPlanMode = e.permission_mode === 'plan'
+    isPlanApproved = false
+
+    return next(e)
   })
 
   on('classic.Notification', async ($, e, next) => {
