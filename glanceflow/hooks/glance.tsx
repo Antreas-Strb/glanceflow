@@ -348,7 +348,8 @@ const syncTicker = ($: $, list: GlanceChecklist | null) => {
     tickerEvery = every
     ticker = $.clock.every(every, () => {
       void update($, tickAtom, tick => (tick ?? 0) + 1)
-      void checkStall($)
+      // A tick runs 4 times a second: a failure here must not repeat as an unhandled error.
+      void checkStall($).catch(() => undefined)
     })
   }
 }
@@ -598,13 +599,26 @@ const readHistory = async ($: $, days?: readonly string[]): Promise<GlanceHistor
   return mergedEntries(stored)
 }
 
+// This project's pace, kept between jobs: reading every chat's 30 days of history held up each new job, about 20 ms
+// for every 1,000 saved jobs. A job this chat records clears it.
+// shortcut: jobs other chats finish count from this chat's next session; refresh it on a timer if that matters.
+let pace: { project: string; ms: number | null } | undefined
+
 /** This project's pace from the History of the last 30 days; null when it isn't known yet. */
 const learnPace = async ($: $): Promise<number | null> => {
   try {
-    return paceFromHistory(await readHistory($), await $.session.cwd())
+    const project = await $.session.cwd()
+    if (pace?.project !== project) pace = { project, ms: paceFromHistory(await readHistory($), project) }
+    return pace.ms
   } catch {
     return null
   }
+}
+
+/** The pace already learned for this project, at once; undefined until it is. */
+const knownPace = async ($: $): Promise<number | null | undefined> => {
+  const project = await $.session.cwd().catch(() => null)
+  return pace !== undefined && pace.project === project ? pace.ms : undefined
 }
 
 /** The person's standing goal for this project; null when none is set or the store can't be read. */
@@ -619,6 +633,7 @@ const readGoal = async ($: $): Promise<string | null> => {
 
 const startJob = async ($: $, text: string, jobId: string) => {
   const previous = await read($, checklistAtom)
+  const known = await knownPace($)
   const list: GlanceChecklist = {
     // Until Haiku names it in English, a request in another language shows a neutral title.
     title: isLatinText(text.split('\n')[0] ?? '') ? cleanName(text.split('\n')[0]) : 'Working on your request',
@@ -639,7 +654,7 @@ const startJob = async ($: $, text: string, jobId: string) => {
     activity: null,
     approval: 'none',
     costAtStart: (await read($, usageAtom)).costUsd,
-    paceMs: await learnPace($),
+    paceMs: known ?? null,
     doneWhen: null,
     goal: await readGoal($),
     // Work still running from the last job stays in view.
@@ -650,6 +665,12 @@ const startJob = async ($: $, text: string, jobId: string) => {
   await update($, checklistAtom, () => list)
   syncTicker($, list)
   saveSoon($)
+  // Not learned yet: the checklist shows now, and gets the pace once History is read.
+  if (known === undefined) {
+    void learnPace($)
+      .then(ms => (ms === null ? null : change($, one => (one.jobId === jobId && one.paceMs === null ? { ...one, paceMs: ms } : one))))
+      .catch(() => undefined)
+  }
   // Name the job in the background; a newer job wins.
   $.clock.after(0, () => void nameJob($, text, jobId))
 }
@@ -665,7 +686,8 @@ const nameJob = async ($: $, text: string, jobId: string) => {
         'like "Build my landing page", in sentence case: only the first word and names get a capital. ' +
         'Always in English, even when the request is in another language. ' +
         'No file names, code, quotes or punctuation. ' +
-        `Reply with the name only.\n\nRequest:\n${text.slice(0, 2000)}`,
+        // Masked like everything GlanceFlow shows: keys and personal details stay out of the naming request.
+        `Reply with the name only.\n\nRequest:\n${maskPrivate(text).slice(0, 2000)}`,
     })
     if (!answer.isAnswered) {
       return
@@ -862,7 +884,10 @@ const recordJob = async ($: $) => {
     const day = dayKey(list.startedAt)
     // This chat's own key only: the store locks one set at a time, so a shared key could lose another chat's job.
     const key = historyKey(day, await $.session.id())
-    await $.store.set(key, upsertEntry(await $.store.get(key), entryFromChecklist(list, project, jobCost(list, await read($, usageAtom)))))
+    const entry = entryFromChecklist(list, project, jobCost(list, await read($, usageAtom)))
+    await $.store.set(key, upsertEntry(await $.store.get(key), entry))
+    // A finished job with timed steps changes the pace: the next job learns it again, in the background.
+    if (entry.outcome === 'done' && (entry.doneUnits ?? 0) > 0) pace = undefined
     const view = await read($, historyAtom)
     if (view !== null && view.day === day && view.project === project) {
       const entries = await readHistory($, [day])
@@ -1307,6 +1332,8 @@ export function registerGlance(on: On): void {
     for (const key of expiredHistoryKeys(await $.store.keys(), await now($))) {
       await $.store.delete(key)
     }
+    // Learned now, so the first job's time left needs no wait.
+    void learnPace($)
     await $.tool.register({
       name: 'plan_steps',
       description:

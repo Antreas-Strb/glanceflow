@@ -3728,6 +3728,78 @@ test('a finished job keeps the size and time of its steps, so the next job learn
   expect(saved[0]?.doneMs).toBe(5 * 60_000)
 })
 
+test("a new job starts without reading History: the project's pace is learned once and again only after a job that changes it", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const store = new Map<string, unknown>([['history:2026-10-05', [pastJob('a', '/work/landing-site', 4, 240_000), pastJob('b', '/work/landing-site', 4, 240_000)]]])
+  let historyReads = 0
+  on('store.get', (_, e) => {
+    if (e.key.startsWith('history:')) historyReads += 1
+    return { value: store.get(e.key) } as never
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined } as never
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  on('session.cwd', () => ({ value: '/work/landing-site' }) as never)
+  on('session.id', () => ({ value: 'chat-1' }) as never)
+  on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: {} } as never }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('tool.call', () => ({ result: {} as never }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  const job = async (turnId: string, finish: boolean) => {
+    await $.turn.start({ text: `Build my landing page ${turnId}`, turnId })
+    await callTool($, { tool: PLAN, steps: ['Read notes', 'Write copy', 'Add form', 'Polish it'], sizes: ['S', 'M', 'M', 'L'] })
+    const shown = (await texts($, 'terminal')).join('\n')
+    if (finish) {
+      for (const task of ['Read notes', 'Write copy', 'Add form', 'Polish it']) {
+        await clock.advance(60_000)
+        await callTool($, { tool: PROGRESS, task, percent: 100 })
+      }
+    }
+    await $.turn.complete({ turnId } as never)
+    return shown
+  }
+
+  // The first job shows at once and gets the pace as soon as History is read: 8 units at 1 minute a unit.
+  expect(await job('t1', true)).toContain('about 8m left')
+  expect(historyReads).toBeGreaterThan(0)
+  // t1 finished with timed steps, so t2 learns the pace again; t2 changes nothing, so t3 reads only its own day, to
+  // record itself.
+  historyReads = 0
+  await job('t2', false)
+  expect(historyReads).toBeGreaterThan(1)
+  historyReads = 0
+  expect(await job('t3', false)).toMatch(/about \d+m left/)
+  expect(historyReads).toBe(1)
+})
+
+test('the request Haiku names a job from is masked first', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  let asked = ''
+  on('model.complete', (_, e) => {
+    asked = String((e as { prompt?: string }).prompt ?? '')
+    return { value: { isAnswered: true, text: 'Email the invoice', usage: {} } } as never
+  })
+  await $.turn.start({ text: `Email jane@example.com the invoice, the password is ${SAMPLE_PASSWORD}`, turnId: 't1' })
+  // The job is named in the background.
+  await clock.advance(1)
+  expect(asked).toContain('the invoice')
+  expect(asked).not.toContain('jane@example.com')
+  expect(asked).not.toContain(SAMPLE_PASSWORD)
+})
+
 test("a finished step's summary shows under it until Claude moves on, and code stays out of it", async ($, on) => {
   world(on)
   await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
