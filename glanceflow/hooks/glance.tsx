@@ -152,6 +152,8 @@ const METER_MIN_COLUMNS = 50
 // Longer plans fold finished and later steps into one line each; the Plan panel has them all.
 const COMPACT_AFTER = 5
 const MAX_SUMMARY = 100
+/** The most each of a job's For you and Decided on its own lists keeps. */
+const MAX_NOTES = 8
 const METER = 10
 const LABEL_WIDTH = 7
 const TICK_MS = 250
@@ -276,6 +278,7 @@ The person follows your work on a checklist above the prompt, in plain English.
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
 - Write every step name in plain English a non-technical person understands, under 40 characters, starting with a verb, like "Build the pricing section".
 - Never put file paths, file names, commands, code or tool names in a step name.
+- When something only the person can do or decide comes up, put it in report_progress' for_you; when you choose something neither the plan nor the person settled, put it in decided. One short line each.
 - Fill in plan_steps' done_when: what will be true when the job is done, and what other than you will show it. Make the last step that check. When the job changes code, run the project's tests, build or type check rather than saying it passed. The checklist shows whether changed code was tested.`
 
 const SPINNER = ['◐', '◓', '◑', '◒']
@@ -1491,6 +1494,17 @@ export function registerGlance(on: On): void {
             description:
               'With percent 100: one short plain-English sentence on what the step got done, for the person and their team. No file names or code.',
           },
+          for_you: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'What only the person can do or decide, that came up in this step: a sign-in, a key, a payment, a choice between options, a step you could not run. One short plain-English line each.',
+          },
+          decided: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Choices you made in this step that neither the plan nor the person settled, so they can check them. One short plain-English line each.',
+          },
         },
         required: ['task', 'percent'],
       },
@@ -1968,16 +1982,23 @@ export function registerGlance(on: On): void {
     }
 
     if (tool === PROGRESS_TOOL) {
-      const input = e as unknown as { task?: unknown; percent?: unknown; summary?: unknown }
+      const input = e as unknown as { task?: unknown; percent?: unknown; summary?: unknown; for_you?: unknown; decided?: unknown }
       const percent = Math.min(100, Math.max(0, Math.round(Number(input.percent) || 0)))
       const name = cleanName(String(input.task ?? ''))
       const summary = percent === 100 && String(input.summary ?? '').trim() ? cleanName(input.summary, MAX_SUMMARY) : null
+      // Each line once (in any case), as first said, up to MAX_NOTES.
+      const added = (known: string[] | undefined, said: unknown) => {
+        const all = [...(known ?? []), ...(Array.isArray(said) ? said : []).filter(one => String(one ?? '').trim()).map(one => cleanName(one, MAX_SUMMARY))]
+        return all.filter((one, at) => all.findIndex(other => other.toLowerCase() === one.toLowerCase()) === at).slice(0, MAX_NOTES)
+      }
       await change($, list => ({
         ...list,
         tasks: applyProgress(list.tasks, name, percent).map(one =>
           summary !== null && one.name.toLowerCase() === name.toLowerCase() ? { ...one, summary } : one,
         ),
         activity: percent === 100 ? null : list.activity,
+        forYou: added(list.forYou, input.for_you),
+        decided: added(list.decided, input.decided),
       }))
 
       return { result: `Progress noted: ${percent}%.` }
@@ -2878,6 +2899,21 @@ export function registerGlance(on: On): void {
             {`Done when: ${list.doneWhen}`}
           </Text>
         )}
+        {(
+          [
+            ['for-you', 'For you', list.forYou ?? []],
+            ['decided', 'Decided on its own', list.decided ?? []],
+          ] as [string, string, string[]][]
+        ).map(([key, heading, items]) =>
+          items.length === 0 ? null : (
+            <Box key={key} flexDirection="column" marginTop={1}>
+              <Text bold>{heading}</Text>
+              {items.map((one, at) => (
+                <Text key={`${key}-${at}`} wrap="wrap">{`• ${one}`}</Text>
+              ))}
+            </Box>
+          ),
+        )}
         {vector ? (
           <Box key="progress" flexDirection="row" alignItems="center" gap={1} marginTop={1}>
             <Box flexShrink={0}>{kit.meter(isDone ? 'ok' : 'active', percent, 0, `${percent}% done`, 160)}</Box>
@@ -3266,6 +3302,20 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
               <Text wrap="truncate-end" color={needsYou ? 'yellow' : undefined} dimColor={!needsYou}>
                 {needsYou ? `${GLYPH.bell} ${otherLine(columns - 2)}` : otherLine(columns)}
               </Text>
+            </Box>
+          ),
+    )
+  }
+  // What only the person can do or decide: the first in full, the rest in the Plan.
+  const forYou = list?.forYou ?? []
+  if (forYou.length > 0) {
+    const words = `For you: ${forYou[0]}${forYou.length > 1 ? ` · ${forYou.length - 1} more in Plan` : ''}`
+    warnings.push(
+      vector
+        ? line('for-you', kit.icon('bell', 'warn', NOTICE), <Text wrap="truncate-end">{words}</Text>)
+        : (
+            <Box key="for-you" width={columns}>
+              <Text wrap="truncate-end" color="yellow">{`${GLYPH.bell} ${words}`}</Text>
             </Box>
           ),
     )

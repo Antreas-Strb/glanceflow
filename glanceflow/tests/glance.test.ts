@@ -5159,3 +5159,54 @@ test('in the Plan, a helper opens in the main view, and one working in the backg
   }
   expect(stopped).toEqual(['a2', 'b1'])
 })
+
+test('what only the person can do, and what Claude decided on its own, show in the band, the Plan and the team report', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.turn.start({ text: 'Add divide and publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Add divide', 'Test it', 'Publish it'] })
+  await callTool($, { tool: PROGRESS, task: 'Add divide', percent: 100, summary: 'Added division.', decided: ['Dividing by zero raises the usual error'] })
+  await callTool($, { tool: PROGRESS, task: 'Test it', percent: 100, for_you: ['Run the tests yourself: running Python was declined'] })
+  await callTool($, {
+    tool: PROGRESS,
+    task: 'Publish it',
+    percent: 100,
+    // Said again in other words' case: kept once.
+    for_you: ['Give the package a name and version for PyPI', 'run the tests yourself: running Python was declined'],
+  })
+
+  // The band names the first in full and points to the Plan for the rest.
+  for (const surface of SURFACES) {
+    const band = (await texts($, surface)).join('\n')
+    expect(band).toContain('For you: Run the tests yourself: running Python was declined · 1 more in Plan')
+  }
+  const plan = await $.ui.mount({ ...PLAN_PANE, surface: 'desktop' })
+  const shown = (await plan.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  await plan.unmount()
+  expect(shown).toContain('For you\n• Run the tests yourself: running Python was declined\n• Give the package a name and version for PyPI')
+  expect(shown).toContain('Decided on its own\n• Dividing by zero raises the usual error')
+
+  const at = new Date(2026, 9, 6, 9, 0).getTime()
+  const report = teamReport({
+    day: '2026-10-06',
+    project: '/work/landing-site',
+    entries: [
+      {
+        ...ENTRY,
+        jobId: 'a',
+        startedAt: at,
+        finishedAt: at + 5 * 60_000,
+        title: 'Add divide',
+        outcome: 'done',
+        stepsDone: 3,
+        stepsTotal: 3,
+        doneSteps: ['Add divide', 'Test it', 'Publish it'],
+        openSteps: [],
+        forYou: ['Give the package a name and version for PyPI'],
+        decided: ['Dividing by zero raises the usual error'],
+      },
+    ],
+  })
+  expect(report).toContain('  Decided: Dividing by zero raises the usual error')
+  expect(report).toContain('Needs attention\n• Add divide: Give the package a name and version for PyPI')
+})
