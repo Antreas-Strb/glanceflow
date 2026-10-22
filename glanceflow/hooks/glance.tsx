@@ -1002,6 +1002,28 @@ const addTokens = ($: $, agentId: string | undefined, usage: StepUsage) => {
   })
 }
 
+/** Shows a helper's own transcript in the main view, as Claude Code's tasks list does. */
+const openHelper = async ($: $, agentId: string) => {
+  try {
+    const shown = await $.ui.view({ agentId })
+    if ('deny' in shown && shown.deny) $.ui.toast(`Couldn't open that helper: ${shown.deny}`)
+  } catch (error) {
+    // A Claude Code older than the view has no $.ui.view to call.
+    $.ui.toast(`Couldn't open that helper: ${error instanceof TypeError ? 'this needs a newer Claude Code' : String(error)}`)
+  }
+}
+
+/** Stops one helper or task working in the background, with Claude Code's own TaskStop; Claude carries on. */
+const stopHelper = async ($: $, helper: GlanceHelper) => {
+  const taskId = helper.kind === 'background' ? helper.id.replace(/^bg:/, '') : helper.id
+  // The tool table is too wide for TypeScript to check a call against: typed loosely, as the tests call tools.
+  const failed = await ($.tool.call as unknown as (input: unknown) => Promise<{ deny?: string; isError?: boolean; text?: string }>)({
+    tool: 'TaskStop',
+    task_id: taskId,
+  }).catch((error: unknown) => ({ deny: String(error), isError: true, text: '' }))
+  if (failed.deny !== undefined || failed.isError) $.ui.toast(`Couldn't stop it: ${failed.deny ?? failed.text ?? 'Claude Code said no'}`)
+}
+
 const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') => {
   const list = await change($, current => ({
     ...current,
@@ -1773,6 +1795,7 @@ export function registerGlance(on: On): void {
         kind: 'helper',
         label: cleanName(e.description, MAX_DETAIL),
         type: e.subagentType,
+        isBackground: e.background,
         model: prettyModel(started.model),
         effort: null,
         status: 'running',
@@ -2710,7 +2733,7 @@ export function registerGlance(on: On): void {
             .filter(Boolean)
             .join(' · ')
           const words = `${helper.label}${details ? ` · ${details}` : ''}`
-          return vector
+          const line = vector
             ? note(
                 `helper-${helper.id}`,
                 words,
@@ -2721,6 +2744,20 @@ export function registerGlance(on: On): void {
                     : kit.badge('check', 'ok', 'Done', 13),
               )
             : note(`helper-${helper.id}`, `↳ ${mark} ${words}`)
+          // A helper's own transcript opens in the main view; one working in the background can be stopped alone
+          // (any other stops with Esc, with Claude).
+          const canOpen = helper.kind === 'helper'
+          const canStop = helper.status === 'running' && (helper.kind === 'background' || helper.isBackground === true)
+          if (!canOpen && !canStop) return line
+          return (
+            <Box key={`helper-${helper.id}-row`} flexDirection="column">
+              {line}
+              <Box flexDirection="row" gap={1} marginLeft={vector ? 3 : 4}>
+                {canOpen && <Button key={`open-${helper.id}`} label="Open" onPress={() => openHelper($, helper.id)} />}
+                {canStop && <Button key={`stop-${helper.id}`} label="Stop" onPress={() => stopHelper($, helper)} />}
+              </Box>
+            </Box>
+          )
         })
     const tokensOf = (one: GlanceTask) => (isDetailed ? tokenNote(one.tokens, one.cachedTokens) : '')
     const filesOf = (key: string, one: GlanceTask, suffix = '') =>
