@@ -1,6 +1,6 @@
 # Privacy
 
-GlanceFlow is a mod for Claude Code. It has no accounts, no analytics and no server of its own, and it makes no network requests of its own.
+GlanceFlow is a mod for Claude Code. It has no accounts, no analytics and no server of its own, and it makes no network requests of its own. The one exception is when you press **Check for updates** or **Update** in Settings: it then runs Claude Code's own plugin commands, which fetch GlanceFlow's marketplace (on GitHub) and install the newer version.
 
 ## What stays on your computer
 

@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -4273,6 +4273,105 @@ test('/glanceflow goal sets a standing goal for the project: Claude plans toward
 
   expect(await goal('goal off')).toContain('cleared')
   expect(await goalSection()).toBeUndefined()
+})
+
+test('Settings shows the version, checks for a newer one when asked, and installs it', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  // The install as Claude Code reports it, and the newest GlanceFlow in its marketplace.
+  const install = { id: 'glanceflow@claude-mods', scope: 'user', enabled: true, installPath: '/cache/claude-mods/glanceflow/0.26.0' }
+  const newest = '0.27.0'
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: readonly string[] }).argv
+    ran.push(argv.join(' '))
+    const out = (stdout: unknown) => ({ value: { exitCode: 0, stdout: JSON.stringify(stdout), stderr: '' } }) as never
+    if (argv.join(' ') === 'claude plugin list --json') return out([install])
+    if (argv.join(' ') === 'claude plugin list --available --json') return out({ installed: [install], available: [{ pluginId: install.id, source: './glanceflow' }] })
+    if (argv.join(' ') === 'claude plugin marketplace list --json') return out([{ name: 'claude-mods', installLocation: '/markets/claude-mods' }])
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('fs.read', (_, e) => ({ value: JSON.stringify({ version: e.path.startsWith('/markets/') ? newest : '0.26.0' }) }) as never)
+  const shown = async () => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    const words = [...(await ui.findAll({ type: 'Text' })), ...(await ui.findAll({ type: 'Button' }))].map(one => one.text).join('\n')
+    await ui.unmount()
+    return words
+  }
+  const press = async (key: string) => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    await ui.press({ key })
+    await ui.unmount()
+  }
+
+  // Nothing runs until the person asks.
+  let words = await shown()
+  expect(words).toContain('GlanceFlow 0.26.0.')
+  expect(words).toContain('Check for updates')
+  expect(ran).toEqual([])
+
+  await press('update')
+  expect(ran).toContain('claude plugin marketplace update claude-mods')
+  words = await shown()
+  expect(words).toContain('GlanceFlow 0.27.0 is out.')
+  expect(words).toContain('Update to 0.27.0')
+
+  await press('update')
+  expect(ran).toContain('claude plugin update glanceflow@claude-mods')
+  words = await shown()
+  expect(words).toContain('GlanceFlow 0.27.0 is installed. Open a new chat to use it.')
+  expect(words).not.toContain('Update to')
+})
+
+test('Version: the newest is said plainly, a copy run from a folder is not updated from a marketplace, and a failure gives the command', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  let id = 'glanceflow@claude-mods'
+  let isBroken = false
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: readonly string[] }).argv
+    ran.push(argv.join(' '))
+    if (isBroken) throw new Error('claude: not found')
+    const out = (stdout: unknown) => ({ value: { exitCode: 0, stdout: JSON.stringify(stdout), stderr: '' } }) as never
+    if (argv.join(' ') === 'claude plugin list --json') return out([{ id, scope: 'user', enabled: true, installPath: '/somewhere' }])
+    if (argv.join(' ') === 'claude plugin list --available --json') return out({ installed: [], available: [{ pluginId: id, version: '0.26.0' }] })
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('fs.read', () => ({ value: JSON.stringify({ version: '0.26.0' }) }) as never)
+  const check = async () => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    await ui.press({ key: 'update' })
+    await ui.unmount()
+    const again = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    const words = [...(await again.findAll({ type: 'Text' })), ...(await again.findAll({ type: 'Button' }))].map(one => one.text).join('\n')
+    await again.unmount()
+    return words
+  }
+
+  let words = await check()
+  expect(words).toContain('You have the newest version.')
+  expect(words).not.toContain('Update to')
+
+  isBroken = true
+  words = await check()
+  expect(words).toContain("Couldn't check or update from here. In a terminal, run: claude plugin update glanceflow@claude-mods")
+  expect(words).toContain('Check again')
+
+  // A copy loaded from a folder updates where it lives: no marketplace fetch, and no button to press again.
+  isBroken = false
+  id = 'glanceflow@inline'
+  ran.length = 0
+  words = await check()
+  expect(words).toContain('runs from a folder')
+  expect(words).not.toContain('Check again')
+  expect(ran.some(one => one.includes('marketplace update'))).toBe(false)
+
+  expect(isNewerVersion('0.27.0', '0.26.0')).toBe(true)
+  expect(isNewerVersion('0.26.10', '0.26.9')).toBe(true)
+  expect(isNewerVersion('1.0.0', '0.99.9')).toBe(true)
+  expect(isNewerVersion('0.26.0', '0.26.0')).toBe(false)
+  expect(isNewerVersion('0.25.3', '0.26.0')).toBe(false)
 })
 
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */
