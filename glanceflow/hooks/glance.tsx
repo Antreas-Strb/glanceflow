@@ -3693,17 +3693,31 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   const activeEstimate = activeStep ? stepEstimate(list, activeStep, stepClock).percent : undefined
   const overall = overallProgress(list.tasks, activeEstimate).percent
   let header: RenderChildren
+  // A Needs you reason too long for the header gets a line of its own under it, kept whole: a permission request's
+  // risk words come last, and they must never be the part that is cut off.
+  let headerNote: RenderChildren = null
   if (list.phase === 'needsYou') {
     const reason = needsText(list) ?? PERMISSION
+    const fits = widthOf(reason) <= (vector ? headerWidth - 6 - widthOf('Needs you') : headerWidth - 12)
+    const shown = fits ? [reason] : []
+    if (!fits) {
+      headerNote = vector ? (
+        line('needs-you', kit.blank(), <Text wrap="wrap">{reason}</Text>)
+      ) : (
+        <Box key="needs-you" width={columns}>
+          <Text wrap="wrap">{reason}</Text>
+        </Box>
+      )
+    }
     header = vector ? (
       // The amber is in the icon; the words keep the app's text colour, which reads on a light window too.
-      headline(kit.badge('bell', 'warn', STATUS), 'Needs you', [reason], { isRestPlain: true })
+      headline(kit.badge('bell', 'warn', STATUS), 'Needs you', shown, { isRestPlain: true })
     ) : (
       <Text wrap="truncate-end">
         <Text bold inverse color="yellow">
           {' Needs you '}
         </Text>
-        <Text> {fit(reason, headerWidth - 12).trimEnd()}</Text>
+        {fits && <Text> {reason}</Text>}
       </Text>
     )
   } else if (list.phase === 'stuck') {
@@ -3811,7 +3825,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   const hasMeter = columns >= METER_MIN_COLUMNS
   const bar = (cells: string) => (hasMeter ? ` ${cells} ` : ' ')
   const nameWidth = Math.max(4, Math.min(MAX_NAME, columns - 2 - 2 - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1))
-  const room = Math.max(1, maxRows - 1 - warnings.length - (actions ? 1 : 0))
+  const room = Math.max(1, maxRows - 1 - (headerNote ? 1 : 0) - warnings.length - (actions ? 1 : 0))
   const firstUpcoming = list.tasks.findIndex(one => one.status === 'upcoming')
   // What is left of the row after mark, name, meter and label: the step's tokens, when they fit.
   const usageRoom = columns - 2 - nameWidth - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1
@@ -4213,6 +4227,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   return withBeneath(
     <Box flexDirection="column" width={columns}>
       {row(header)}
+      {headerNote}
       {rows}
       {warnings}
       {actions}
