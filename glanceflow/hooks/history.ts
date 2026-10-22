@@ -116,6 +116,8 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     check: jobCheck(list.tasks),
     doneWhen: list.doneWhen ?? null,
     goal: list.goal ?? null,
+    forYou: list.forYou ?? [],
+    decided: list.decided ?? [],
   }
 }
 
@@ -249,6 +251,7 @@ export function teamReport(
     for (const one of done) {
       lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${CHECK_WORDS[one.check]}` : ''}`)
       if (one.doneWhen) lines.push(`  Done when: ${one.doneWhen}`)
+      for (const item of one.decided ?? []) lines.push(`  Decided: ${item}`)
       const notes = one.doneNotes ?? []
       if (notes.some(Boolean)) {
         // What each step got done, in Claude's words where it gave them.
@@ -265,12 +268,16 @@ export function teamReport(
     for (const one of open) {
       const next = one.openSteps[0] ? `; next: ${one.openSteps[0].charAt(0).toLowerCase()}${one.openSteps[0].slice(1)}` : ''
       lines.push(`• ${one.title}: ${one.doneSteps.length} of ${one.stepsTotal} steps done${next}`)
+      for (const item of one.decided ?? []) lines.push(`  Decided: ${item}`)
     }
     lines.push('')
   }
-  if (blocked.length > 0) {
+  // What only the person can do or decide, from any job, and the jobs that got stuck.
+  const forYou = jobs.flatMap(one => (one.forYou ?? []).map(item => `• ${one.title}: ${item}`))
+  if (blocked.length > 0 || forYou.length > 0) {
     lines.push('Needs attention')
     for (const one of blocked) lines.push(`• ${one.title}: it got stuck and needs a decision`)
+    lines.push(...forYou)
     lines.push('')
   }
 
