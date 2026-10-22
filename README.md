@@ -164,6 +164,7 @@ The steps follow the finish flow of [Ponytail](https://github.com/DietrichGebert
 | `/glanceflow tour` | Shows the three welcome cards again |
 | `/glanceflow pause`, `/glanceflow continue` | Pauses Claude, or picks the job up again |
 | `/glanceflow plan` | Opens the whole plan in a side panel |
+| `/glanceflow show` | Opens the checklist in a panel again, for VS Code, which has no band above the prompt |
 | `/glanceflow settings` | Opens the settings: view, sounds, desktop notices, other chats, calm mode, plan approval, Finish on GitHub, password guard and when to tidy up |
 | `/glanceflow tidy` | Saves a checkpoint, then tidies up the chat |
 | `/glanceflow checkpoint` | Shows where we left off: the checkpoint saved before the last tidy-up |
@@ -186,7 +187,7 @@ The button above the prompt cycles Simple, Details and Off; in the Desktop app t
 ## Limits
 
 - The Desktop app draws its own one-line tool summary ("Used 3 tools"); a mod can't hide it.
-- The VS Code extension doesn't draw mods yet ([anthropics/claude-code#99423](https://github.com/anthropics/claude-code/issues/99423)), so GlanceFlow shows nothing there. Run `claude` in VS Code's own terminal instead, or use the Desktop app's Code tab.
+- The VS Code extension (2.1.299 or later) draws no band above the prompt, so there the checklist opens in a **GlanceFlow** panel: above the prompt box in a narrow chat, beside it in one 800 pixels or wider. Closed, it comes back with `/glanceflow show`. Buttons there have no hotkeys: click them.
 - Pattern matching can't catch every secret written in plain words.
 - **Update to …** runs Claude Code's own `claude plugin` commands, so `claude` must be on the app's PATH. If it can't run them, the Version row shows the command to run in a terminal.
 - `tested` comes from the commands Claude runs: tests run through a script or alias with another name aren't seen, and a test tool that reports failures in unusual words may read as passed.

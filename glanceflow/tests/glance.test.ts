@@ -4988,3 +4988,40 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
 })
+
+test('in VS Code, which draws no band above the prompt, the checklist opens in a pane', async ($, on) => {
+  world(on)
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push((e as { id: string }).id)
+    return { value: { isPlaced: true } } as never
+  })
+  on('session.attach', (_, e) => ({ clientId: e.clientId }) as never)
+
+  await $.session.attach({ surface: 'vscode', clientId: 'vscode:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+  // A terminal or the desktop app has the band: no pane there.
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const ui = await $.ui.mount({
+    plugin: 'glanceflow',
+    component: 'Pane',
+    requestId: 'glanceflow-checklist',
+    surface: 'vscode',
+    props: { title: 'GlanceFlow', isFocused: false, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 12 }, view: {} },
+  })
+  const shown = (await ui.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  const buttons = (await ui.findAll({ type: 'Button' })).map(one => one.text).join('\n')
+  await ui.unmount()
+  expect(shown).toContain('Write the page')
+  expect(shown).toContain('Check it')
+  expect(buttons).toContain('Settings')
+
+  // Closed by the person, it comes back with /glanceflow show.
+  const reply = await $.command.run({ command: 'glanceflow', args: 'show' } as never)
+  expect(opened).toEqual(['glanceflow-checklist', 'glanceflow-checklist'])
+  expect(JSON.stringify(reply)).toContain('checklist is open')
+})

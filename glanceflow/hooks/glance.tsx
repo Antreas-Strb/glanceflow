@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On, RenderChildren, RenderElement, RenderSurface, Timer } from 'claude-code'
+import type { EngineInterface, On, RenderChildren, RenderElement, RenderInput, RenderSurface, Timer } from 'claude-code'
 
 import type {
   GlanceFile,
@@ -216,6 +216,7 @@ const HISTORY_PANE = 'glanceflow-history'
 const PLAN_PANE = 'glanceflow-plan'
 const RECAP_PANE = 'glanceflow-recap'
 const SETTINGS_PANE = 'glanceflow-settings'
+const CHECKLIST_PANE = 'glanceflow-checklist'
 const handoffAtom = atom({ plugin: 'glanceflow', key: 'handoffState' } as const, 'idle')
 const updateAtom = atom({ plugin: 'glanceflow', key: 'update' } as const, { state: 'idle', latest: null, id: null } as GlanceUpdate)
 const HANDOFF_CONFIRM_MS = 8000
@@ -282,6 +283,8 @@ const FILE_TOOLS: Record<string, 'file_path' | 'notebook_path'> = { Write: 'file
 const REJECTED = /doesn't want to proceed|user (has )?(rejected|denied|declined)/i
 
 type $ = EngineInterface
+/** Where the checklist band draws: above the prompt, or in VS Code its pane. */
+type BandEvent = RenderInput<'AbovePrompt' | 'Pane'>
 
 // Module state: a reload starts these over (session.start restarts the ticker).
 let ticker: Timer | undefined
@@ -1182,6 +1185,7 @@ const resetSettings = async ($: $) => {
 }
 
 const showSettings = ($: $) => $.ui.open({ id: SETTINGS_PANE, title: 'GlanceFlow settings', closeOnEscape: true })
+const openChecklist = ($: $) => $.ui.open({ id: CHECKLIST_PANE, title: 'GlanceFlow' })
 
 // This copy's version, from its own plugin.json, read once; null when it can't be read.
 let ownVersion: string | null | undefined
@@ -1457,10 +1461,12 @@ export function registerGlance(on: On): void {
     await $.command.register({
       name: 'glanceflow',
       description:
-        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
+        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, show, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
     })
     // A reload drops the module's timers; pick the animation back up.
     syncTicker($, await read($, checklistAtom))
+    // VS Code may have attached before GlanceFlow loaded (a reload): open its checklist pane now.
+    if ((await $.session.surfaces()).includes('vscode')) await openChecklist($)
 
     return next(e)
   })
@@ -1495,6 +1501,10 @@ export function registerGlance(on: On): void {
           ? 'The password guard is on: a message that looks like it has a password or key in it is held back.'
           : 'The password guard is off: every message is sent as you write it.',
       }
+    }
+    if (arg === 'show') {
+      const opened = await openChecklist($)
+      return { text: opened.isPlaced ? 'The GlanceFlow checklist is open.' : `Couldn't open the checklist: ${opened.reason}.` }
     }
     if (arg === 'tour') {
       await update($, enabledAtom, () => true)
@@ -3108,972 +3118,986 @@ export function registerGlance(on: On): void {
     }
     // Other mods draw in this band too (an approval card, prompt buttons): keep theirs, under ours.
     const beneath = await next(e).catch(() => null)
-    const table = $.ui.resolve(e)
-    const { Box, Text, Button } = table
-    // The desktop app, VS Code and the phone set text in a proportional font and draw vectors: there the band is
-    // flex rows with SVG marks and one slim bar. The terminal lines its columns up by cells, with glyphs.
-    const kit = kitOf(table, e.surface)
-    const vector = kit.isVector
-    const isEnabled = await read($, enabledAtom)
-    const list = isEnabled ? await read($, checklistAtom) : null
-    // Another mod's buttons (Replay, say) sit with GlanceFlow's own actions at the bottom right, in every state of the
-    // band; anything else it draws stays under it.
-    const lifted = vector && isEnabled ? liftButtons(beneath) : { buttons: [], rest: beneath }
-    const kept = lifted.rest as RenderElement | null
-    // What is beneath may be the engine's own node, which can't sit under a Box with a width: wrap, don't nest.
-    const withBeneath = (tree: RenderElement): RenderElement =>
-      kept ? (
-        <Box flexDirection="column">
-          {tree}
-          {kept}
-        </Box>
-      ) : (
-        tree
-      )
-    const tick = list ? await read($, tickAtom) : 0
-    const usage = isEnabled ? await read($, usageAtom) : NO_USAGE
-    const isDetailed = isEnabled && (await read($, detailAtom)) === 'detailed'
-    const isCalm = isEnabled && (await read($, calmAtom))
-    const handoff = isEnabled ? await read($, handoffAtom) : 'idle'
-    const armed = isEnabled ? await read($, armedAtom) : null
-    const canShip = isEnabled && (await read($, shipOnGithubAtom)) && (await read($, hasGithubAtom))
-    const columns = Math.max(20, e.props.bodyColumns)
-    const current = await now($)
+    return drawBand($, e, e.props.maxRows, beneath)
+  })
 
-    // A line of the band on vector surfaces: a mark, then what it says, then anything kept to the right.
-    // A box that holds a cut line needs minWidth 0: in the desktop app's flex rows, it would otherwise push past the edge.
-    const line = (key: string, mark: RenderChildren, body: RenderChildren, right?: RenderChildren) => (
-      <Box key={key} flexDirection="row" alignItems="center" gap={1} width={columns}>
-        {mark}
-        <Box flexGrow={1} flexShrink={1} minWidth={0}>
-          {body}
-        </Box>
-        {right !== undefined && <Box flexShrink={0}>{right}</Box>}
+  // VS Code draws no band above the prompt, but it draws panes: there the checklist opens in one, which a narrow
+  // panel seats above the prompt box.
+  on('session.attach', { surface: 'vscode' }, async ($, e, next) => {
+    await openChecklist($)
+    return next(e)
+  })
+  on('ui.render', { component: 'Pane', requestId: CHECKLIST_PANE }, async ($, e) => drawBand($, e, e.props.scroll.bodyRows + 1, null))
+}
+
+// The checklist band, drawn above the prompt or, in VS Code, in its pane: `maxRows` is the room it has, with the
+// `n more` row a band keeps for a taller tree.
+async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElement | null) {
+  const table = $.ui.resolve(e)
+  const { Box, Text, Button } = table
+  // The desktop app, VS Code and the phone set text in a proportional font and draw vectors: there the band is
+  // flex rows with SVG marks and one slim bar. The terminal lines its columns up by cells, with glyphs.
+  const kit = kitOf(table, e.surface)
+  const vector = kit.isVector
+  const isEnabled = await read($, enabledAtom)
+  const list = isEnabled ? await read($, checklistAtom) : null
+  // Another mod's buttons (Replay, say) sit with GlanceFlow's own actions at the bottom right, in every state of the
+  // band; anything else it draws stays under it.
+  const lifted = vector && isEnabled ? liftButtons(beneath) : { buttons: [], rest: beneath }
+  const kept = lifted.rest as RenderElement | null
+  // What is beneath may be the engine's own node, which can't sit under a Box with a width: wrap, don't nest.
+  const withBeneath = (tree: RenderElement): RenderElement =>
+    kept ? (
+      <Box flexDirection="column">
+        {tree}
+        {kept}
       </Box>
+    ) : (
+      tree
     )
+  const tick = list ? await read($, tickAtom) : 0
+  const usage = isEnabled ? await read($, usageAtom) : NO_USAGE
+  const isDetailed = isEnabled && (await read($, detailAtom)) === 'detailed'
+  const isCalm = isEnabled && (await read($, calmAtom))
+  const handoff = isEnabled ? await read($, handoffAtom) : 'idle'
+  const armed = isEnabled ? await read($, armedAtom) : null
+  const canShip = isEnabled && (await read($, shipOnGithubAtom)) && (await read($, hasGithubAtom))
+  const columns = Math.max(20, e.props.bodyColumns)
+  const current = await now($)
 
-    // Plan usage, always in view; it turns yellow, then red, as a window fills.
-    const warnings: RenderChildren[] = []
-    // The other chats on this computer: one that needs the person, in amber, else how many are at work, quietly.
-    const others = isEnabled && (await read($, showsOthersAtom)) ? await read($, othersAtom) : []
-    const otherWords = otherChatsWords(others)
-    // Who needs the person comes first and is never left out for the shorter count after it: cut to whole words instead.
-    const otherLine = (room: number) => wholePieces(widthOf(otherWords[0] ?? '') <= room ? otherWords : otherWords.slice(0, 1), room)
-    if (otherWords.length > 0) {
-      const needsYou = others.some(one => one.needsYou)
-      warnings.push(
-        vector
-          ? line(
-              'others',
-              kit.icon(needsYou ? 'bell' : 'eye', needsYou ? 'warn' : 'quiet', NOTICE),
-              <Text wrap="truncate-end" dimColor={!needsYou}>
-                {otherLine(Math.floor(columns / 0.8) - 3)}
-              </Text>,
-            )
-          : (
-              <Box key="others" width={columns}>
-                <Text wrap="truncate-end" color={needsYou ? 'yellow' : undefined} dimColor={!needsYou}>
-                  {needsYou ? `${GLYPH.bell} ${otherLine(columns - 2)}` : otherLine(columns)}
-                </Text>
-              </Box>
-            ),
-      )
-    }
-    // Last row: open the history, or hand this chat off to a fresh one (a second press confirms).
-    const list0 = isEnabled ? await read($, checklistAtom) : null
-    const canPause =
-      runningTurn !== undefined &&
-      list0 !== null &&
-      (list0.phase === 'working' || list0.phase === 'needsYou') &&
-      list0.needsYouReason !== WAITING &&
-      list0.approval !== 'waiting'
-    // Claude asked something: elsewhere than the terminal Continue would read as a yes, so only an answer moves on.
-    const canContinue =
-      list0 !== null &&
-      (list0.phase === 'stopped' ||
-        list0.phase === 'stuck' ||
-        (list0.phase === 'needsYou' && list0.needsYouReason === WAITING && !(vector && list0.question)))
-    // An action: on the terminal its glyph leads the label. Elsewhere it is the app's own button, so it reads as one
-    // at a glance; the one that matters now (Continue, Start) is the primary one.
-    const action = (key: string, icon: IconName, label: string, onPress: () => unknown, short?: string, isMain = false) =>
-      vector ? (
-        <Button key={key} variant={isMain ? 'primary' : 'secondary'} label={label} onPress={onPress} />
-      ) : (
-        <Button key={key} plain label={short ?? `${GLYPH[icon]} ${label}`} onPress={onPress} />
-      )
-    const handoffLabel =
-      armed === 'handoff' ? 'Press again to start a fresh chat' : handoff === 'working' ? 'Writing a handoff note…' : 'Fresh chat'
-    // What steers the job (Pause, Start, Continue); elsewhere than the terminal it sits beside the job's status.
-    // Elsewhere than the terminal a stuck job is tried again, and a usage limit won't lift for a press, so that
-    // button stays quiet.
-    const isStuck = list0?.phase === 'stuck'
-    const pauseLabel = 'Pause'
-    const isLimitStuck = isStuck && /limit/i.test(list0?.stuckReason ?? '')
-    // Beside "try again later" a usage limit's button checks whether it has lifted.
-    const continueLabel = vector && isStuck ? (isLimitStuck ? 'Check again' : 'Try again') : 'Continue'
-    const controls = isEnabled
-      ? [
-          canPause && action('pause', 'pause', pauseLabel, () => pauseJob($)),
-          list0?.approval === 'waiting' && action('aim', 'spark', 'Aim higher', () => aimHigher($)),
-          list0?.approval === 'waiting' && action('start', 'play', 'Start', () => startPlan($), undefined, true),
-          canContinue && action('continue', 'play', continueLabel, () => continueJob($), undefined, !(vector && isLimitStuck)),
-        ].filter(Boolean)
-      : []
-    const tidyAt = isEnabled ? await read($, tidyAtAtom) : 0
-    const isChatFull = usage.contextPercent !== null && tidyAt > 0 && usage.contextPercent >= tidyAt
-    // A fresh chat ends this one. Elsewhere than the terminal it stands apart from the places to go, and only once the
-    // job has stopped or finished (mid-job, Tidy up now is the way to make room), or while a first press waits.
-    // While a stopped job's chat is full, Tidy up now is the one way offered to make room.
-    const handoffItem =
-      list0 !== null &&
-      (!vector || list0.phase === 'done' || (list0.phase === 'stopped' && !isChatFull) || handoff === 'working' || armed === 'handoff') &&
-      action('handoff', 'fresh', handoffLabel, () => pressHandoff($), handoffLabel === 'Fresh chat' && columns < 40 ? '↻ Fresh' : undefined)
-    // Finish on GitHub: once the job is done, one press closes it out; a merged pull request archives the chat.
-    const shipItem =
-      canShip &&
-      (list0?.phase === 'done' || armed === 'ship') &&
-      action('ship', 'ship', armed === 'ship' ? 'Press again to ship' : 'Ship it', () => pressTwice($, 'ship', () => shipIt($)), undefined, armed !== 'ship')
-    // Where to go from here: the plan, the history, the settings.
-    const places = isEnabled
-      ? [
-          list0?.hasPlan && action('plan', 'plan', 'Plan', () => showPlan($)),
-          // ≣, not ☰: Unicode 16 made ☰ two cells wide, and the row shifted in newer terminals.
-          action('history', 'history', 'History', () => showHistory($, dayKey(current), true)),
-          action('settings', 'sliders', 'Settings', () => showSettings($), columns < 60 ? '⚙' : undefined),
-          !vector && handoffItem,
-          !vector && shipItem,
-        ].filter(Boolean)
-      : []
-    const actionItems = isEnabled ? [...controls, ...places] : null
-    const chatPart = usage.contextPercent === null ? '' : `chat ${Math.round(usage.contextPercent)}% full`
-    const usageParts = [
-      ...usage.limits.map(one => `${one.label} ${Math.round(one.percent)}%`),
-      // On the terminal the line below says how full the chat is, with the button to tidy it up: not twice.
-      isChatFull && !vector ? '' : chatPart,
-    ].filter(Boolean)
-    const top = usage.limitPercent ?? 0
-    const isHigh = top >= LIMIT_WARN
-    const reset = isHigh ? resetTime(usage.limitResetsAt, await now($)) : null
-    const tidy = <Button key="compact" label={vector ? 'Tidy up now' : 'Tidy it up'} onPress={() => tidyUp($)} />
-    if (vector) {
-      // One quiet row: the details view always shows usage; the simple view only near a limit or with the chat past the
-      // tidy-up mark, whose button sits with the other actions. The icon carries the colour, as the app's own notices do.
-      if (usageParts.length > 0 && (isDetailed || isHigh || isChatFull)) {
-        const words = isHigh
-          ? [`You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit`, reset === null ? '' : `resets ${reset}`, isChatFull ? chatPart : '']
-          : isDetailed
-            ? [`Usage: ${usageParts[0] ?? ''}`, ...usageParts.slice(1)]
-            : [`This ${chatPart.replace(/^chat/, 'chat is')}`, 'tidying up keeps a checkpoint first']
-        warnings.push(
-          line(
-            'limit',
-            isHigh
-              ? kit.icon('alert', top >= LIMIT_ALERT ? 'alert' : 'warn', NOTICE)
-              : isChatFull
-                ? kit.icon('tidy', 'warn', NOTICE)
-                : kit.icon('clock', 'quiet', NOTICE),
-            // Whole pieces, as in the header: about 0.8 of a cell a character, less the mark.
-            <Text wrap="truncate-end" dimColor={!isHigh}>
-              {wholePieces(words, Math.floor(columns / 0.8) - 3)}
+  // A line of the band on vector surfaces: a mark, then what it says, then anything kept to the right.
+  // A box that holds a cut line needs minWidth 0: in the desktop app's flex rows, it would otherwise push past the edge.
+  const line = (key: string, mark: RenderChildren, body: RenderChildren, right?: RenderChildren) => (
+    <Box key={key} flexDirection="row" alignItems="center" gap={1} width={columns}>
+      {mark}
+      <Box flexGrow={1} flexShrink={1} minWidth={0}>
+        {body}
+      </Box>
+      {right !== undefined && <Box flexShrink={0}>{right}</Box>}
+    </Box>
+  )
+
+  // Plan usage, always in view; it turns yellow, then red, as a window fills.
+  const warnings: RenderChildren[] = []
+  // The other chats on this computer: one that needs the person, in amber, else how many are at work, quietly.
+  const others = isEnabled && (await read($, showsOthersAtom)) ? await read($, othersAtom) : []
+  const otherWords = otherChatsWords(others)
+  // Who needs the person comes first and is never left out for the shorter count after it: cut to whole words instead.
+  const otherLine = (room: number) => wholePieces(widthOf(otherWords[0] ?? '') <= room ? otherWords : otherWords.slice(0, 1), room)
+  if (otherWords.length > 0) {
+    const needsYou = others.some(one => one.needsYou)
+    warnings.push(
+      vector
+        ? line(
+            'others',
+            kit.icon(needsYou ? 'bell' : 'eye', needsYou ? 'warn' : 'quiet', NOTICE),
+            <Text wrap="truncate-end" dimColor={!needsYou}>
+              {otherLine(Math.floor(columns / 0.8) - 3)}
             </Text>,
-          ),
-        )
-      }
-    } else if (usageParts.length > 0 && (isDetailed || isHigh)) {
-      // The simple view speaks up only near a limit; the detailed view always shows usage.
-      const color = top >= LIMIT_ALERT ? 'red' : isHigh ? 'yellow' : undefined
-      const words = isHigh
-        ? `You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit${reset === null ? '' : ` · resets ${reset}`} · ${usageParts.join(' · ')}`
-        : `Plan usage: ${usageParts.join(' · ')}`
-      warnings.push(
-        <Box key="limit" width={columns}>
-          <Text wrap="truncate-end" color={color} dimColor={!isHigh}>
-            {isHigh ? `⚠ ${words}` : words}
-          </Text>
-        </Box>,
-      )
-    }
-    if (isChatFull && !vector && usage.contextPercent !== null) {
-      const words = `This chat is ${Math.round(usage.contextPercent)}% full. Claude saves a checkpoint before tidying up.`
-      warnings.push(
-        <Box key="long-chat" flexDirection="row" justifyContent="space-between" width={columns}>
-          <Box flexShrink={1}>
-            <Text wrap="truncate-end" color="yellow">
-              {words}
-            </Text>
-          </Box>
-          {tidy}
-        </Box>,
-      )
-    }
-
-    const isRecapShown = isEnabled && (await read($, recapAtom))
-    const recapButton = <Button key="recap" label="Where we left off" onPress={() => showRecap($)} />
-    const recapOk = <Button key="recap-ok" plain={vector ? undefined : true} label="OK" onPress={() => update($, recapAtom, () => false)} />
-    if (isRecapShown) {
-      const buttons = (
-        <Box flexDirection="row" gap={1}>
-          {recapButton}
-          {recapOk}
-        </Box>
-      )
-      warnings.push(
-        vector ? (
-          // Its buttons sit with the other actions at the bottom right.
-          line(
-            'recap',
-            kit.badge('check', 'ok', NOTICE),
-            <Text wrap="truncate-end">Chat tidied up. Claude kept a checkpoint of the work.</Text>,
           )
-        ) : (
-          <Box key="recap" flexDirection="row" justifyContent="space-between" width={columns}>
-            <Box flexShrink={1}>
-              <Text wrap="truncate-end" color="green">
-                ✓ Chat tidied up. Claude kept a checkpoint of the work.
+        : (
+            <Box key="others" width={columns}>
+              <Text wrap="truncate-end" color={needsYou ? 'yellow' : undefined} dimColor={!needsYou}>
+                {needsYou ? `${GLYPH.bell} ${otherLine(columns - 2)}` : otherLine(columns)}
               </Text>
             </Box>
-            {buttons}
-          </Box>
+          ),
+    )
+  }
+  // Last row: open the history, or hand this chat off to a fresh one (a second press confirms).
+  const list0 = isEnabled ? await read($, checklistAtom) : null
+  const canPause =
+    runningTurn !== undefined &&
+    list0 !== null &&
+    (list0.phase === 'working' || list0.phase === 'needsYou') &&
+    list0.needsYouReason !== WAITING &&
+    list0.approval !== 'waiting'
+  // Claude asked something: elsewhere than the terminal Continue would read as a yes, so only an answer moves on.
+  const canContinue =
+    list0 !== null &&
+    (list0.phase === 'stopped' ||
+      list0.phase === 'stuck' ||
+      (list0.phase === 'needsYou' && list0.needsYouReason === WAITING && !(vector && list0.question)))
+  // An action: on the terminal its glyph leads the label. Elsewhere it is the app's own button, so it reads as one
+  // at a glance; the one that matters now (Continue, Start) is the primary one.
+  const action = (key: string, icon: IconName, label: string, onPress: () => unknown, short?: string, isMain = false) =>
+    vector ? (
+      <Button key={key} variant={isMain ? 'primary' : 'secondary'} label={label} onPress={onPress} />
+    ) : (
+      <Button key={key} plain label={short ?? `${GLYPH[icon]} ${label}`} onPress={onPress} />
+    )
+  const handoffLabel =
+    armed === 'handoff' ? 'Press again to start a fresh chat' : handoff === 'working' ? 'Writing a handoff note…' : 'Fresh chat'
+  // What steers the job (Pause, Start, Continue); elsewhere than the terminal it sits beside the job's status.
+  // Elsewhere than the terminal a stuck job is tried again, and a usage limit won't lift for a press, so that
+  // button stays quiet.
+  const isStuck = list0?.phase === 'stuck'
+  const pauseLabel = 'Pause'
+  const isLimitStuck = isStuck && /limit/i.test(list0?.stuckReason ?? '')
+  // Beside "try again later" a usage limit's button checks whether it has lifted.
+  const continueLabel = vector && isStuck ? (isLimitStuck ? 'Check again' : 'Try again') : 'Continue'
+  const controls = isEnabled
+    ? [
+        canPause && action('pause', 'pause', pauseLabel, () => pauseJob($)),
+        list0?.approval === 'waiting' && action('aim', 'spark', 'Aim higher', () => aimHigher($)),
+        list0?.approval === 'waiting' && action('start', 'play', 'Start', () => startPlan($), undefined, true),
+        canContinue && action('continue', 'play', continueLabel, () => continueJob($), undefined, !(vector && isLimitStuck)),
+      ].filter(Boolean)
+    : []
+  const tidyAt = isEnabled ? await read($, tidyAtAtom) : 0
+  const isChatFull = usage.contextPercent !== null && tidyAt > 0 && usage.contextPercent >= tidyAt
+  // A fresh chat ends this one. Elsewhere than the terminal it stands apart from the places to go, and only once the
+  // job has stopped or finished (mid-job, Tidy up now is the way to make room), or while a first press waits.
+  // While a stopped job's chat is full, Tidy up now is the one way offered to make room.
+  const handoffItem =
+    list0 !== null &&
+    (!vector || list0.phase === 'done' || (list0.phase === 'stopped' && !isChatFull) || handoff === 'working' || armed === 'handoff') &&
+    action('handoff', 'fresh', handoffLabel, () => pressHandoff($), handoffLabel === 'Fresh chat' && columns < 40 ? '↻ Fresh' : undefined)
+  // Finish on GitHub: once the job is done, one press closes it out; a merged pull request archives the chat.
+  const shipItem =
+    canShip &&
+    (list0?.phase === 'done' || armed === 'ship') &&
+    action('ship', 'ship', armed === 'ship' ? 'Press again to ship' : 'Ship it', () => pressTwice($, 'ship', () => shipIt($)), undefined, armed !== 'ship')
+  // Where to go from here: the plan, the history, the settings.
+  const places = isEnabled
+    ? [
+        list0?.hasPlan && action('plan', 'plan', 'Plan', () => showPlan($)),
+        // ≣, not ☰: Unicode 16 made ☰ two cells wide, and the row shifted in newer terminals.
+        action('history', 'history', 'History', () => showHistory($, dayKey(current), true)),
+        action('settings', 'sliders', 'Settings', () => showSettings($), columns < 60 ? '⚙' : undefined),
+        !vector && handoffItem,
+        !vector && shipItem,
+      ].filter(Boolean)
+    : []
+  const actionItems = isEnabled ? [...controls, ...places] : null
+  const chatPart = usage.contextPercent === null ? '' : `chat ${Math.round(usage.contextPercent)}% full`
+  const usageParts = [
+    ...usage.limits.map(one => `${one.label} ${Math.round(one.percent)}%`),
+    // On the terminal the line below says how full the chat is, with the button to tidy it up: not twice.
+    isChatFull && !vector ? '' : chatPart,
+  ].filter(Boolean)
+  const top = usage.limitPercent ?? 0
+  const isHigh = top >= LIMIT_WARN
+  const reset = isHigh ? resetTime(usage.limitResetsAt, await now($)) : null
+  const tidy = <Button key="compact" label={vector ? 'Tidy up now' : 'Tidy it up'} onPress={() => tidyUp($)} />
+  if (vector) {
+    // One quiet row: the details view always shows usage; the simple view only near a limit or with the chat past the
+    // tidy-up mark, whose button sits with the other actions. The icon carries the colour, as the app's own notices do.
+    if (usageParts.length > 0 && (isDetailed || isHigh || isChatFull)) {
+      const words = isHigh
+        ? [`You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit`, reset === null ? '' : `resets ${reset}`, isChatFull ? chatPart : '']
+        : isDetailed
+          ? [`Usage: ${usageParts[0] ?? ''}`, ...usageParts.slice(1)]
+          : [`This ${chatPart.replace(/^chat/, 'chat is')}`, 'tidying up keeps a checkpoint first']
+      warnings.push(
+        line(
+          'limit',
+          isHigh
+            ? kit.icon('alert', top >= LIMIT_ALERT ? 'alert' : 'warn', NOTICE)
+            : isChatFull
+              ? kit.icon('tidy', 'warn', NOTICE)
+              : kit.icon('clock', 'quiet', NOTICE),
+          // Whole pieces, as in the header: about 0.8 of a cell a character, less the mark.
+          <Text wrap="truncate-end" dimColor={!isHigh}>
+            {wholePieces(words, Math.floor(columns / 0.8) - 3)}
+          </Text>,
         ),
       )
     }
-
-    // The view: on the terminal one button steps through Simple → Details → Off. Elsewhere a menu shows the view and
-    // the others, so no press turns GlanceFlow off by surprise; a surface without one (the phone) keeps the button.
-    const view = !isEnabled ? 'off' : isDetailed ? 'detailed' : 'simple'
-    const button =
-      vector && 'Select' in table && table.Select ? (
-        <table.Select
-          key="view"
-          label="View"
-          value={view}
-          options={[
-            { value: 'detailed', label: 'Detailed' },
-            { value: 'simple', label: 'Simple' },
-            { value: 'off', label: 'Off' },
-          ]}
-          onSelect={value => void setView($, value as typeof view)}
-        />
-      ) : (
-      <Button
-        key="toggle"
-        label={
-          vector
-            ? `View: ${view === 'off' ? 'Off' : view === 'detailed' ? 'Detailed' : 'Simple'}`
-            : columns < NARROW
-              ? !isEnabled
-                ? '○ Off'
-                : isDetailed
-                  ? '● Details'
-                  : '● Simple'
-              : !isEnabled
-                ? '○ GlanceFlow: Off'
-                : isDetailed
-                  ? '● GlanceFlow: Details'
-                  : '● GlanceFlow: Simple'
-        }
-        variant={isEnabled && !vector ? 'primary' : 'secondary'}
-        onPress={() => cycleMode($, isEnabled, isDetailed)}
-      />
-      )
-    // The row under the checklist. Elsewhere than the terminal: where to go on the left; on the right everything that
-    // acts, together: another mod's buttons, Tidy up now, Fresh chat, then Pause, Start or Continue, the main one last,
-    // as a dialog's buttons sit. In a narrow band the actions wrap onto a line of their own and still keep to the right.
-    const actions =
-      actionItems === null ? null : vector ? (
-        <Box key="actions" flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2} rowGap={1} flexWrap="wrap" width={columns} marginTop={1}>
-          <Box flexDirection="row" alignItems="center" columnGap={1} rowGap={1} flexWrap="wrap" flexShrink={1} minWidth={0}>
-            {places}
-          </Box>
-          <Box flexDirection="row" alignItems="center" justifyContent="flex-end" columnGap={1} rowGap={1} flexWrap="wrap" flexGrow={1} flexShrink={1} minWidth={0}>
-            {isRecapShown && recapButton}
-            {isRecapShown && recapOk}
-            {lifted.buttons as RenderElement[]}
-            {isChatFull && tidy}
-            {handoffItem}
-            {shipItem}
-            {controls}
-          </Box>
-        </Box>
-      ) : (
-        <Box key="actions" flexDirection="row" gap={columns < 44 ? 1 : 2}>
-          {actionItems}
-        </Box>
-      )
-    // The header's right end holds the view, on every surface: elsewhere than the terminal a menu, as wide as
-    // "View Detailed" at about 0.8 of a cell a character, and its arrow and padding.
-    const headerRight = button
-    const rightCells = vector ? Math.ceil('View Detailed'.length * 0.8) + 4 : columns < NARROW ? 15 : 27
-    // In characters. Elsewhere than the terminal the app's font sets about 0.8 of a cell a character, so the header
-    // counts that many more before it cuts its words.
-    const headerWidth = Math.max(0, vector ? Math.floor((columns - rightCells - 2) / 0.8) : columns - rightCells)
-    const row = (header: RenderChildren) => (
-      <Box key="header" flexDirection="row" justifyContent="space-between" alignItems={vector ? 'center' : undefined} columnGap={vector ? 2 : undefined} width={columns}>
-        <Box flexShrink={1} flexGrow={1} minWidth={0}>
-          {header}
-        </Box>
-        {headerRight !== null && (
-          <Box key="header-right" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-            {headerRight}
-          </Box>
-        )}
-      </Box>
+  } else if (usageParts.length > 0 && (isDetailed || isHigh)) {
+    // The simple view speaks up only near a limit; the detailed view always shows usage.
+    const color = top >= LIMIT_ALERT ? 'red' : isHigh ? 'yellow' : undefined
+    const words = isHigh
+      ? `You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit${reset === null ? '' : ` · resets ${reset}`} · ${usageParts.join(' · ')}`
+      : `Plan usage: ${usageParts.join(' · ')}`
+    warnings.push(
+      <Box key="limit" width={columns}>
+        <Text wrap="truncate-end" color={color} dimColor={!isHigh}>
+          {isHigh ? `⚠ ${words}` : words}
+        </Text>
+      </Box>,
     )
-    // The bold words of a header are never cut: the longest of the ways to say it that fits, else the shortest.
-    const leadOf = (ways: string[]) => ways.find(one => widthOf(one) <= headerWidth - 3) ?? ways[ways.length - 1] ?? ''
-    // The header on vector surfaces: a mark, what is happening in bold, then the rest dim. Given as pieces, the rest
-    // keeps whole pieces that fit and leaves the others out, as the Working header does.
-    const headline = (mark: RenderChildren, lead: string | string[], rest: string | string[], look: { isRestPlain?: boolean } = {}) => {
-      const shownLead = leadOf(Array.isArray(lead) ? lead : [lead])
-      const room = Math.max(0, headerWidth - 3 - widthOf(shownLead))
-      const shown = Array.isArray(rest) ? wholePieces(rest, room - 3) : fit(rest, room).trimEnd()
-      return (
-        <Box flexDirection="row" alignItems="center" gap={1}>
-          {mark}
-          <Text wrap="truncate-end">
-            <Text bold>{shownLead}</Text>
-            <Text dimColor={!look.isRestPlain}>{Array.isArray(rest) ? (shown === '' ? '' : ` · ${shown}`) : shown}</Text>
+  }
+  if (isChatFull && !vector && usage.contextPercent !== null) {
+    const words = `This chat is ${Math.round(usage.contextPercent)}% full. Claude saves a checkpoint before tidying up.`
+    warnings.push(
+      <Box key="long-chat" flexDirection="row" justifyContent="space-between" width={columns}>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end" color="yellow">
+            {words}
           </Text>
         </Box>
-      )
-    }
+        {tidy}
+      </Box>,
+    )
+  }
 
-    const tourStep = isEnabled && list === null ? await read($, tourAtom) : null
-    if (tourStep !== null) {
-      const isLast = tourStep === TOUR.length - 1
-      if (vector) {
-        // The checklist's frame: the view at the top right; under the words the places to go on the left, and on the
-        // right the tour's own buttons, Next last.
-        return withBeneath(
-          <Box flexDirection="column" width={columns}>
-            {row(
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                {kit.icon('spark', 'active', STATUS)}
-                <Text bold wrap="truncate-end">
-                  {leadOf(['Welcome to GlanceFlow', 'Welcome'])}
-                </Text>
-              </Box>,
-            )}
-            {line('tour-text', kit.blank(), <Text wrap="wrap">{TOUR_VECTOR[tourStep]}</Text>)}
-            {warnings}
-            <Box key="tour" flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2} rowGap={1} flexWrap="wrap" width={columns} marginTop={1}>
-              <Box flexDirection="row" alignItems="center" columnGap={1}>
-                {action('history', 'history', 'History', () => showHistory($, dayKey(current), true))}
-                {action('settings', 'sliders', 'Settings', () => showSettings($))}
-              </Box>
-              <Box flexDirection="row" alignItems="center" justifyContent="flex-end" columnGap={1} flexGrow={1}>
-                {lifted.buttons as RenderElement[]}
-                <Box alignItems="center" marginLeft={1} marginRight={1}>
-                  {kit.dots(TOUR.length, tourStep)}
-                </Box>
-                {!isLast && <Button key="tour-skip" label="Skip" onPress={() => stepTour($, null)} />}
-                <Button key="tour-next" variant="primary" label={isLast ? 'Got it' : 'Next'} onPress={() => stepTour($, tourStep + 1)} />
-              </Box>
-            </Box>
-          </Box>,
+  const isRecapShown = isEnabled && (await read($, recapAtom))
+  const recapButton = <Button key="recap" label="Where we left off" onPress={() => showRecap($)} />
+  const recapOk = <Button key="recap-ok" plain={vector ? undefined : true} label="OK" onPress={() => update($, recapAtom, () => false)} />
+  if (isRecapShown) {
+    const buttons = (
+      <Box flexDirection="row" gap={1}>
+        {recapButton}
+        {recapOk}
+      </Box>
+    )
+    warnings.push(
+      vector ? (
+        // Its buttons sit with the other actions at the bottom right.
+        line(
+          'recap',
+          kit.badge('check', 'ok', NOTICE),
+          <Text wrap="truncate-end">Chat tidied up. Claude kept a checkpoint of the work.</Text>,
         )
-      }
-      return withBeneath(
-        <Box flexDirection="column" width={columns}>
-          <Text bold wrap="truncate-end">{`Welcome to GlanceFlow · ${tourStep + 1} of ${TOUR.length}`}</Text>
-          <Text wrap="wrap">{TOUR[tourStep]}</Text>
-          <Box key="tour" flexDirection="row" gap={2} marginBottom={1}>
-            <Button key="tour-next" plain label={isLast ? '✓ Got it' : 'Next ▶'} onPress={() => stepTour($, tourStep + 1)} />
-            {!isLast && <Button key="tour-skip" plain label="Skip" onPress={() => stepTour($, null)} />}
+      ) : (
+        <Box key="recap" flexDirection="row" justifyContent="space-between" width={columns}>
+          <Box flexShrink={1}>
+            <Text wrap="truncate-end" color="green">
+              ✓ Chat tidied up. Claude kept a checkpoint of the work.
+            </Text>
           </Box>
-          {warnings}
-          {actions}
-        </Box>,
-      )
-    }
+          {buttons}
+        </Box>
+      ),
+    )
+  }
 
-    if (list === null) {
-      const hint = vector ? 'Ask Claude for something, and its plan shows here' : 'Ask Claude for something: its plan shows here'
-      // Nothing to show yet. Elsewhere than the terminal it keeps the checklist's frame: the hint and the view on top;
-      // below, the places to go on the left and, when the chat is full, Tidy up now on the right.
+  // The view: on the terminal one button steps through Simple → Details → Off. Elsewhere a menu shows the view and
+  // the others, so no press turns GlanceFlow off by surprise; a surface without one (the phone) keeps the button.
+  const view = !isEnabled ? 'off' : isDetailed ? 'detailed' : 'simple'
+  const button =
+    vector && 'Select' in table && table.Select ? (
+      <table.Select
+        key="view"
+        label="View"
+        value={view}
+        options={[
+          { value: 'detailed', label: 'Detailed' },
+          { value: 'simple', label: 'Simple' },
+          { value: 'off', label: 'Off' },
+        ]}
+        onSelect={value => void setView($, value as typeof view)}
+      />
+    ) : (
+    <Button
+      key="toggle"
+      label={
+        vector
+          ? `View: ${view === 'off' ? 'Off' : view === 'detailed' ? 'Detailed' : 'Simple'}`
+          : columns < NARROW
+            ? !isEnabled
+              ? '○ Off'
+              : isDetailed
+                ? '● Details'
+                : '● Simple'
+            : !isEnabled
+              ? '○ GlanceFlow: Off'
+              : isDetailed
+                ? '● GlanceFlow: Details'
+                : '● GlanceFlow: Simple'
+      }
+      variant={isEnabled && !vector ? 'primary' : 'secondary'}
+      onPress={() => cycleMode($, isEnabled, isDetailed)}
+    />
+    )
+  // The row under the checklist. Elsewhere than the terminal: where to go on the left; on the right everything that
+  // acts, together: another mod's buttons, Tidy up now, Fresh chat, then Pause, Start or Continue, the main one last,
+  // as a dialog's buttons sit. In a narrow band the actions wrap onto a line of their own and still keep to the right.
+  const actions =
+    actionItems === null ? null : vector ? (
+      <Box key="actions" flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2} rowGap={1} flexWrap="wrap" width={columns} marginTop={1}>
+        <Box flexDirection="row" alignItems="center" columnGap={1} rowGap={1} flexWrap="wrap" flexShrink={1} minWidth={0}>
+          {places}
+        </Box>
+        <Box flexDirection="row" alignItems="center" justifyContent="flex-end" columnGap={1} rowGap={1} flexWrap="wrap" flexGrow={1} flexShrink={1} minWidth={0}>
+          {isRecapShown && recapButton}
+          {isRecapShown && recapOk}
+          {lifted.buttons as RenderElement[]}
+          {isChatFull && tidy}
+          {handoffItem}
+          {shipItem}
+          {controls}
+        </Box>
+      </Box>
+    ) : (
+      <Box key="actions" flexDirection="row" gap={columns < 44 ? 1 : 2}>
+        {actionItems}
+      </Box>
+    )
+  // The header's right end holds the view, on every surface: elsewhere than the terminal a menu, as wide as
+  // "View Detailed" at about 0.8 of a cell a character, and its arrow and padding.
+  const headerRight = button
+  const rightCells = vector ? Math.ceil('View Detailed'.length * 0.8) + 4 : columns < NARROW ? 15 : 27
+  // In characters. Elsewhere than the terminal the app's font sets about 0.8 of a cell a character, so the header
+  // counts that many more before it cuts its words.
+  const headerWidth = Math.max(0, vector ? Math.floor((columns - rightCells - 2) / 0.8) : columns - rightCells)
+  const row = (header: RenderChildren) => (
+    <Box key="header" flexDirection="row" justifyContent="space-between" alignItems={vector ? 'center' : undefined} columnGap={vector ? 2 : undefined} width={columns}>
+      <Box flexShrink={1} flexGrow={1} minWidth={0}>
+        {header}
+      </Box>
+      {headerRight !== null && (
+        <Box key="header-right" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+          {headerRight}
+        </Box>
+      )}
+    </Box>
+  )
+  // The bold words of a header are never cut: the longest of the ways to say it that fits, else the shortest.
+  const leadOf = (ways: string[]) => ways.find(one => widthOf(one) <= headerWidth - 3) ?? ways[ways.length - 1] ?? ''
+  // The header on vector surfaces: a mark, what is happening in bold, then the rest dim. Given as pieces, the rest
+  // keeps whole pieces that fit and leaves the others out, as the Working header does.
+  const headline = (mark: RenderChildren, lead: string | string[], rest: string | string[], look: { isRestPlain?: boolean } = {}) => {
+    const shownLead = leadOf(Array.isArray(lead) ? lead : [lead])
+    const room = Math.max(0, headerWidth - 3 - widthOf(shownLead))
+    const shown = Array.isArray(rest) ? wholePieces(rest, room - 3) : fit(rest, room).trimEnd()
+    return (
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {mark}
+        <Text wrap="truncate-end">
+          <Text bold>{shownLead}</Text>
+          <Text dimColor={!look.isRestPlain}>{Array.isArray(rest) ? (shown === '' ? '' : ` · ${shown}`) : shown}</Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  const tourStep = isEnabled && list === null ? await read($, tourAtom) : null
+  if (tourStep !== null) {
+    const isLast = tourStep === TOUR.length - 1
+    if (vector) {
+      // The checklist's frame: the view at the top right; under the words the places to go on the left, and on the
+      // right the tour's own buttons, Next last.
       return withBeneath(
         <Box flexDirection="column" width={columns}>
           {row(
-            !isEnabled ? (
-              vector ? (
-                <Text dimColor wrap="truncate-end">
-                  GlanceFlow is off: Claude Code shows everything as usual
-                </Text>
-              ) : (
-                <Text> </Text>
-              )
-            ) : vector ? (
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                {kit.icon('plan', 'quiet', 'No plan yet')}
-                <Text dimColor wrap="truncate-end">
-                  {wholePieces([hint], headerWidth - 3)}
-                </Text>
-              </Box>
-            ) : (
-              <Text dimColor wrap="truncate-end">
-                {fit(hint, headerWidth).trimEnd()}
+            <Box flexDirection="row" alignItems="center" gap={1}>
+              {kit.icon('spark', 'active', STATUS)}
+              <Text bold wrap="truncate-end">
+                {leadOf(['Welcome to GlanceFlow', 'Welcome'])}
               </Text>
-            ),
+            </Box>,
           )}
+          {line('tour-text', kit.blank(), <Text wrap="wrap">{TOUR_VECTOR[tourStep]}</Text>)}
           {warnings}
-          {actions}
-        </Box>,
-      )
-    }
-
-    const elapsed = (vector ? durationWords : formatDuration)((list.finishedAt ?? current) - list.startedAt)
-    // A paused or stopped job's clock stands still at the moment it stopped.
-    const stepClock = list.finishedAt ?? current
-    const jobTokens = list.tasks.reduce((sum, one) => sum + one.tokens, list.extraTokens)
-    const jobCached = list.tasks.reduce((sum, one) => sum + one.cachedTokens, list.extraCachedTokens)
-    const spent = jobCost(list, usage)
-    const jobTokenNote = isDetailed
-      ? [tokenNote(jobTokens, jobCached), spent === null ? '' : formatCost(spent)].filter(Boolean).join(' · ')
-      : ''
-    const activeStep = list.tasks.find(one => one.status === 'active')
-    // Why Claude stopped, when it isn't working: on vector surfaces it sits beside the current step, so the header keeps
-    // to the state and the job's name; with no current step it stays in the header.
-    const limitResets = list.phase === 'stuck' && /limit/i.test(list.stuckReason ?? '') ? resetTime(usage.limitResetsAt, current) : null
-    const reason =
-      list.phase === 'stuck'
-        ? // Elsewhere than the terminal a usage limit reads as a short fact, with when it lifts where the app has told us.
-          vector && /limit/i.test(list.stuckReason ?? '')
-          ? `Usage limit reached · ${limitResets === null ? 'try again later' : `resets ${limitResets}`}`
-          : (list.stuckReason ?? FAILING)
-        : list.phase === 'stopped'
-          ? list.stopKind === 'pause'
-            ? 'press Continue to pick up'
-            : 'you pressed Esc'
-          : ''
-    const isReasonOnStep = vector && activeStep !== undefined
-    // Both views fill the current step from its time estimate, so the percentage moves before a step is checked off.
-    const activeEstimate = activeStep ? stepEstimate(list, activeStep, stepClock).percent : undefined
-    const overall = overallProgress(list.tasks, activeEstimate).percent
-    let header: RenderChildren
-    if (list.phase === 'needsYou') {
-      const reason = needsText(list) ?? PERMISSION
-      header = vector ? (
-        // The amber is in the icon; the words keep the app's text colour, which reads on a light window too.
-        headline(kit.badge('bell', 'warn', STATUS), 'Needs you', [reason], { isRestPlain: true })
-      ) : (
-        <Text wrap="truncate-end">
-          <Text bold inverse color="yellow">
-            {' Needs you '}
-          </Text>
-          <Text> {fit(reason, headerWidth - 12).trimEnd()}</Text>
-        </Text>
-      )
-    } else if (list.phase === 'stuck') {
-      header = vector ? (
-        headline(kit.badge('bang', 'alert', STATUS), 'Stuck', isReasonOnStep ? [list.title] : [reason, list.title])
-      ) : (
-        <Text wrap="truncate-end" color="yellow" bold={isCalm}>
-          {fit(`⚠ Stuck: ${list.stuckReason ?? FAILING}`, headerWidth).trimEnd()}
-        </Text>
-      )
-    } else if (list.phase === 'stopped') {
-      const isPause = list.stopKind === 'pause'
-      header = vector ? (
-        headline(
-          kit.badge(isPause ? 'pause' : 'stop', 'quiet', STATUS),
-          isPause ? 'Paused' : 'Stopped',
-          isReasonOnStep ? [list.title] : [reason, list.title],
-        )
-      ) : (
-        <Text wrap="truncate-end" dimColor={!isCalm} bold={isCalm}>
-          {fit(
-            isPause ? `‖ Paused · press Continue to pick up · ${list.title}` : `■ Stopped · you pressed Esc · ${list.title}`,
-            headerWidth,
-          ).trimEnd()}
-        </Text>
-      )
-    } else if (list.phase === 'background') {
-      const running = list.helpers.filter(one => one.status === 'running').length
-      header = vector ? (
-        headline(
-          kit.icon('clock', 'active', STATUS),
-          ['Still working in the background', 'In the background', 'Background'],
-          [`${running} left`, list.title, elapsed],
-        )
-      ) : (
-        <Text wrap="truncate-end" color="cyan" bold={isCalm}>
-          {fit(`◷ Still working in the background · ${running} left · ${list.title} · ${elapsed}`, headerWidth).trimEnd()}
-        </Text>
-      )
-    } else if (list.phase === 'done') {
-      // Whether the code the job changed was tested: outside proof, not Claude's own word.
-      const check = jobCheck(list.tasks)
-      const checkWords = check === null ? '' : CHECK_WORDS[check]
-      header = vector ? (
-        headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, checkWords, `took ${elapsed}`, jobTokenNote])
-      ) : (
-        <Text wrap="truncate-end" color="green" bold={isCalm}>
-          {fit(
-            `✓ All done · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
-            headerWidth,
-          ).trimEnd()}
-        </Text>
-      )
-    } else {
-      // Time left follows the percentage shown, so the two never disagree.
-      const left = list.hasPlan ? timeLeft(list, current, activeEstimate) : null
-      const hasGrown = list.hasPlan && list.plannedCount > 0 && list.tasks.length > list.plannedCount
-      // Time left replaces time spent once there is an estimate. Elsewhere than the terminal the ring shows the
-      // percentage, so the words count steps, as the Plan does.
-      const stepsDone = list.tasks.filter(one => one.status === 'done').length
-      const lead = list.approval === 'waiting' ? 'Plan ready' : 'Working'
-      const pieces = [
-        list.hasPlan ? (vector ? `${stepsDone} of ${list.tasks.length} done` : `${overall}%`) : '',
-        // Elsewhere than the terminal a bare "8s" could read as time left: it says so.
-        left === null ? (vector ? `${elapsed} so far` : elapsed) : `about ${formatLeft(left)} left`,
-        hasGrown ? `plan grew ${list.plannedCount} → ${list.tasks.length}` : '',
-        jobTokenNote,
-      ]
-      // Elsewhere than the terminal, where the job's name leaves no room for how far it is, the name gives way: the
-      // steps are right below it, and the Plan has it.
-      const firstPiece = pieces.find(Boolean) ?? ''
-      const roomWithTitle = headerWidth - 6 - widthOf(lead) - widthOf(list.title)
-      const keepsTitle = !vector || firstPiece === '' || widthOf(` · ${firstPiece}`) <= roomWithTitle
-      const detailRoom = !vector ? headerWidth - Math.min(list.title.length, 20) : keepsTitle ? roomWithTitle : headerWidth - 3 - widthOf(lead)
-      // Whole pieces drop off the end when there is no room, never half a word.
-      const shownDetails = headerDetails(pieces, detailRoom)
-      // Elsewhere than the terminal not even the first piece is cut.
-      const details = vector && widthOf(shownDetails) > detailRoom ? '' : shownDetails
-      header = vector ? (
-        // Every state's header reads the same way: its mark, the state in bold, then the job and how far it is.
-        headline(
-          list.hasPlan ? kit.ring(overall, 0, `${overall}% done`) : kit.ring(null, isCalm ? 0 : tick, STATUS),
-          lead,
-          keepsTitle ? ` · ${list.title}${details}` : details,
-        )
-      ) : (
-        <Text wrap="truncate-end">
-          <Text bold>{fit(list.title, Math.max(8, headerWidth - details.length)).trimEnd()}</Text>
-          <Text dimColor>{details}</Text>
-        </Text>
-      )
-    }
-
-    if (list.phase === 'done' && list.isCollapsed) {
-      return withBeneath(
-        <Box flexDirection="column" width={columns}>
-          {row(header)}
-          {warnings}
-          {actions}
-        </Box>,
-      )
-    }
-
-    // Name column: whatever the row leaves after mark, meter and label, so rows never wrap.
-    const hasMeter = columns >= METER_MIN_COLUMNS
-    const bar = (cells: string) => (hasMeter ? ` ${cells} ` : ' ')
-    const nameWidth = Math.max(4, Math.min(MAX_NAME, columns - 2 - 2 - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1))
-    const room = Math.max(1, e.props.maxRows - 1 - warnings.length - (actions ? 1 : 0))
-    const firstUpcoming = list.tasks.findIndex(one => one.status === 'upcoming')
-    // What is left of the row after mark, name, meter and label: the step's tokens, when they fit.
-    const usageRoom = columns - 2 - nameWidth - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1
-    const noteOf = (one: GlanceTask) => {
-      let timeNote = ''
-      if (one.status === 'done' && one.startedAt !== null && one.finishedAt !== null) {
-        timeNote = `took ${(vector ? durationWords : formatDuration)(one.finishedAt - one.startedAt)}`
-      } else if (one.status === 'active') {
-        const estimate = stepEstimate(list, one, stepClock)
-        // Elsewhere than the terminal the band gives the step's time left alone; the Plan keeps the time spent too.
-        timeNote = vector ? leftLabel(estimate.leftMs, true) : `${formatDuration(estimate.elapsedMs)} · ${leftLabel(estimate.leftMs)}`
-      }
-      return isDetailed ? [timeNote, tokenNote(one.tokens, one.cachedTokens)].filter(Boolean).join(' · ') : ''
-    }
-    const usageCell = (one: GlanceTask) => {
-      const note = noteOf(one)
-      return note && usageRoom >= 12 ? <Text dimColor>{` ${fit(note, usageRoom - 1).trimEnd()}`}</Text> : null
-    }
-    // A step on vector surfaces: its mark and name, then, dim, what it is doing or got done; in Details its time and
-    // tokens keep to a column on the right. A step whose mark says it all gets no word of its own.
-    // Its time follows it inline, as a finished step's does. When the row runs short the tail gives way first (it
-    // shrinks a hundred times faster than the name), and the time is never cut.
-    // What follows the name reads as the header does: parts joined by " · " with no wider gap before the dot (the
-    // spaces are no-break ones, which the app keeps at the start of a part), the bar standing in for the first.
-    const join = (words: string) => `\u00a0·\u00a0${words}`
-    // Elsewhere than the terminal a row's words are measured here, at about 0.8 of a cell a character, so the app never
-    // cuts one: past the mark (and `cells` more kept beside the name), a name too long for the row keeps whole words, and
-    // the tail keeps whole pieces in the room left after the name and the `gap` before the tail.
-    const roomFor = (cells: number) => Math.max(0, Math.floor((columns - 3 - cells) / 0.8) - 1)
-    const fitted = (name: string, tail: string, room: number, gap = 3) => {
-      const shownName = widthOf(name) <= room ? name : wholePieces([name], room)
-      return { name: shownName, tail: tail === '' ? '' : wholePieces(tail.split(' · '), room - widthOf(shownName) - gap) }
-    }
-    const step = (key: string, mark: RenderChildren, name: RenderChildren, tail: string, extra?: RenderChildren, note = '') => (
-      <Box key={key} flexDirection="row" alignItems="center" width={columns}>
-        {mark}
-        <Box flexShrink={1} minWidth={0} marginLeft={1}>
-          {name}
-        </Box>
-        {extra && <Box marginLeft={1}>{extra}</Box>}
-        {tail !== '' && (
-          <Box key="tail" flexShrink={100} minWidth={0} marginLeft={extra ? 1 : 0}>
-            <Text dimColor wrap="truncate-end">
-              {extra ? tail : join(tail)}
-            </Text>
-          </Box>
-        )}
-        {note !== '' && (
-          <Box key="note" flexShrink={0} marginLeft={tail === '' && extra ? 1 : 0}>
-            <Text dimColor>{tail === '' && extra ? note : join(note)}</Text>
-          </Box>
-        )}
-      </Box>
-    )
-    // A line under a step, in line with the step names: what it got done, what Claude is doing, what is out of view.
-    const under = (key: string, text: string) =>
-      vector ? (
-        line(
-          key,
-          kit.blank(),
-          <Text dimColor wrap="truncate-end">
-            {wholePieces(text.split(' · '), roomFor(0))}
-          </Text>,
-        )
-      ) : (
-        <Box key={key} flexDirection="row">
-          <Text dimColor wrap="truncate-end">
-            {fit(`    ${text}`, Math.max(0, columns - 1)).trimEnd()}
-          </Text>
-        </Box>
-      )
-    const lastStepId = list.tasks[list.tasks.length - 1]?.id
-    const stepIds = new Set(list.tasks.map(one => one.id))
-    const helpersOf = (stepId: string) =>
-      list.helpers
-        .filter(one => one.stepId === stepId || (stepId === lastStepId && !stepIds.has(one.stepId)))
-        // Running first, then the latest finished.
-        .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'))
-        .slice(0, HELPERS_PER_STEP)
-
-    // What the step that just finished got done, until Claude's next activity takes the line.
-    // Steps checked off together finish at the same moment: the latest in the plan wins.
-    const justDone = list.tasks
-      .filter(one => one.status === 'done' && one.finishedAt !== null)
-      .reverse()
-      .sort((a, b) => b.finishedAt! - a.finishedAt!)[0]
-    const showsSummary = (list.phase === 'working' || list.phase === 'done') && list.activity === null && Boolean(justDone?.summary)
-
-    // A long plan folds its finished steps, and the steps after the next one, into a line each.
-    const isCompact = list.tasks.length > COMPACT_AFTER
-    const doneSteps = list.tasks.filter(one => one.status === 'done')
-    const foldsDone = isCompact && doneSteps.length >= 2
-    const laterSteps = list.tasks.filter((one, index) => one.status === 'upcoming' && index !== firstUpcoming)
-    const foldsLater = isCompact && laterSteps.length >= 2
-    // Where the current step stands: the word says when Claude isn't working on it.
-    const standing =
-      list.phase === 'needsYou'
-        ? { mark: '‖ ', label: 'Waiting', icon: 'bell' as const, tone: 'warn' as const }
-        : list.phase === 'stuck'
-          ? { mark: '⚠ ', label: 'Stuck', icon: 'bang' as const, tone: 'alert' as const }
-          : list.phase === 'stopped'
-            ? list.stopKind === 'pause'
-              ? { mark: '‖ ', label: 'Paused', icon: 'pause' as const, tone: 'quiet' as const }
-              : { mark: '■ ', label: 'Stopped', icon: 'stop' as const, tone: 'quiet' as const }
-            : null
-
-    // Every line: each step, then the helpers working under it.
-    // `steps`: how many plan steps a line stands for (a folded line stands for several).
-    const lines: { key: string; isActive: boolean; element: RenderChildren; steps?: number }[] = []
-    list.tasks.forEach((one, index) => {
-      const key = `task-${index}`
-      if (one.status === 'done' && foldsDone) {
-        if (one !== doneSteps[0]) return
-        const words = `${doneSteps.length} steps done`
-        lines.push({
-          key,
-          steps: doneSteps.length,
-          isActive: false,
-          element: vector ? (
-            // A summary of steps, not a step: its own quiet mark, so the tick and the ring stay for real steps.
-            step(
-              key,
-              kit.icon('more', 'quiet', 'Folded'),
-              <Text dimColor wrap="truncate-end">
-                {fitted(words, '', roomFor(0)).name}
-              </Text>,
-              '',
-            )
-          ) : (
-            <Box key={key} flexDirection="row">
-              <Text color="green">✓ </Text>
-              <Text dimColor>{fit(words, nameWidth)}</Text>
-              <Text color="green">{bar('█'.repeat(METER))}</Text>
-              <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
+          <Box key="tour" flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2} rowGap={1} flexWrap="wrap" width={columns} marginTop={1}>
+            <Box flexDirection="row" alignItems="center" columnGap={1}>
+              {action('history', 'history', 'History', () => showHistory($, dayKey(current), true))}
+              {action('settings', 'sliders', 'Settings', () => showSettings($))}
             </Box>
-          ),
-        })
-        // A summary under a folded group would hang under the wrong line: the terminal keeps it, elsewhere it goes.
-        if (showsSummary && justDone && !vector) {
-          lines.push({ key: 'summary', isActive: false, element: under('summary', justDone.summary!) })
-        }
-        return
-      }
-      if (one.status === 'upcoming' && foldsLater && index !== firstUpcoming) {
-        if (one !== laterSteps[0]) return
-        // Elsewhere than the terminal the row says where the rest are.
-        const words = vector ? `${laterSteps.length} more steps in Plan` : `${laterSteps.length} more steps`
-        lines.push({
-          key,
-          steps: laterSteps.length,
-          isActive: false,
-          element: vector ? (
-            step(
-              key,
-              kit.icon('more', 'quiet', 'Folded'),
-              <Text dimColor wrap="truncate-end">
-                {fitted(words, '', roomFor(0)).name}
-              </Text>,
-              '',
-            )
-          ) : (
-            <Box key={key} flexDirection="row">
-              <Text dimColor>○ </Text>
-              <Text dimColor>{fit(words, nameWidth)}</Text>
-              <Text dimColor>{bar('░'.repeat(METER))}</Text>
-              <Text dimColor>Later</Text>
-            </Box>
-          ),
-        })
-        return
-      }
-      if (one.status === 'done') {
-        // Its time follows it, dim: kept to the far right it read as the time left.
-        const done = fitted(one.name, [showsSummary && one === justDone ? one.summary! : '', noteOf(one)].filter(Boolean).join(' · '), roomFor(0))
-        lines.push({
-          key,
-          isActive: false,
-          element: vector ? (
-            step(
-              key,
-              kit.icon('done', 'ok', 'Done'),
-              <Text dimColor wrap="truncate-end">
-                {done.name}
-              </Text>,
-              done.tail,
-            )
-          ) : (
-            <Box key={key} flexDirection="row">
-              <Text color="green">✓ </Text>
-              <Text dimColor>{fit(one.name, nameWidth)}</Text>
-              <Text color="green">{bar('█'.repeat(METER))}</Text>
-              <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
-              {usageCell(one)}
-            </Box>
-          ),
-        })
-        if (showsSummary && one === justDone && !vector) {
-          lines.push({ key: 'summary', isActive: false, element: under('summary', one.summary!) })
-        }
-      } else if (one.status === 'active') {
-        // The details view fills the bar gradually from the time estimate; the simple view sweeps until Claude reports.
-        const shownPercent = isDetailed ? stepEstimate(list, one, stepClock).percent : one.percent
-        // Elsewhere than the terminal a bar shows only while Claude works on the step: a frozen one says nothing.
-        const hasPercent = (isDetailed || one.hasReported) && !(vector && standing !== null)
-        const label = standing?.label ?? (hasPercent ? `${shownPercent}%` : 'Working')
-        // Only a step Claude is working on moves; one that waits on you or has stopped stands still.
-        const isStill = isCalm || standing !== null
-        let element: RenderChildren
-        if (vector && list.approval === 'waiting') {
-          // Nothing has started while the plan waits for Start: the first step is one more to come, and the amber of
-          // the header is the only call on you.
-          element = step(key, kit.open('Next'), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
-        } else if (vector) {
-          // The bar shows how far the step is, so no number stands beside it; a step that waits on you or has stopped
-          // goes grey, the header saying why. With no progress reported yet there is no bar, only what Claude is
-          // doing, in its own words when they fit.
-          const activity = list.phase === 'working' ? list.activity : null
-          const doing =
-            activity === null
-              ? ''
-              : activity.detail !== null && widthOf(activity.detail) <= 48
-                ? activity.detail
-                : `${activity.label}${activity.count > 1 ? ` (${activity.count})` : ''}`
-          // Before Claude reports how far it is, a short bar travels along the track: the row reads as every working
-          // row does, and no word repeats the header. A calm screen keeps still, so it shows no bar then.
-          const isSweeping = standing === null && !hasPercent && !isCalm
-          const tail = isReasonOnStep && reason !== '' ? reason.charAt(0).toUpperCase() + reason.slice(1) : doing
-          const note = noteOf(one)
-          // A few letters of what Claude is doing say nothing: it shows only where a dozen or more fit. Why the step
-          // stopped always shows; the header no longer says it.
-          const tailRoom = columns - 3 - widthOf(one.name) - (hasPercent || isSweeping ? 10 : 0) - (note !== '' ? widthOf(note) + 3 : 0)
-          // The bar takes 8 cells and a cell either side; the time beside it is never cut.
-          const hasBar = hasPercent || isSweeping
-          const shown = fitted(
-            one.name,
-            tailRoom >= 14 || (isReasonOnStep && reason !== '') ? tail : '',
-            roomFor(hasBar ? 10 : 0) - (note !== '' ? widthOf(note) + 3 : 0),
-            hasBar ? 0 : 3,
-          )
-          // The bar says how far the step is, so the mark beside the name says Now, as the Plan's does, not that again.
-          element = step(
-            key,
-            kit.badge(standing?.icon ?? 'play', standing?.tone ?? 'active', standing?.label ?? 'Now'),
-            <Text bold wrap="truncate-end">
-              {shown.name}
-            </Text>,
-            shown.tail,
-            hasPercent || isSweeping ? (
-              <Box key="state" flexDirection="row" alignItems="center" flexShrink={0}>
-                {hasPercent
-                  ? kit.meter('active', shownPercent, 0, label, 72)
-                  : kit.meter('active', null, ((tick % 12) + 0.5) / 12, label, 72)}
+            <Box flexDirection="row" alignItems="center" justifyContent="flex-end" columnGap={1} flexGrow={1}>
+              {lifted.buttons as RenderElement[]}
+              <Box alignItems="center" marginLeft={1} marginRight={1}>
+                {kit.dots(TOUR.length, tourStep)}
               </Box>
-            ) : undefined,
-            note,
-          )
-        } else {
-          const filled = Math.round(shownPercent / 10)
-          const sweepAt = tick % (METER + 3)
-          const meter = hasPercent
-            ? '█'.repeat(filled) + '░'.repeat(METER - filled)
-            : isStill
-              ? '░'.repeat(METER)
-              : Array.from({ length: METER }, (_, cell) => (cell >= sweepAt - 2 && cell <= sweepAt ? '█' : '░')).join('')
-          element = (
-            <Box key={key} flexDirection="row">
-              <Text color={standing?.label === 'Stuck' ? 'yellow' : 'cyan'}>{standing?.mark ?? '▶ '}</Text>
-              <Text bold>{fit(one.name, nameWidth)}</Text>
-              <Text color="cyan">{bar(meter)}</Text>
-              <Text>{fit(label, LABEL_WIDTH)}</Text>
-              {usageCell(one)}
+              {!isLast && <Button key="tour-skip" label="Skip" onPress={() => stepTour($, null)} />}
+              <Button key="tour-next" variant="primary" label={isLast ? 'Got it' : 'Next'} onPress={() => stepTour($, tourStep + 1)} />
             </Box>
-          )
-        }
-        lines.push({ key, isActive: true, element })
-        // What Claude is doing right now, in plain words: a line of its own on the terminal; elsewhere it follows the bar.
-        if (list.phase === 'working' && list.activity !== null && !vector) {
-          const { label: doing, count, detail } = list.activity
-          const plain = `${doing}${count > 1 ? ` (${count})` : ''}`
-          // Claude's own sentence when it fits the line whole; otherwise the short plain label, never a cut sentence.
-          const sentence = detail !== null && widthOf(`    Now: ${detail}`) <= columns - 1 ? `Now: ${detail}` : plain
-          lines.push({ key: 'activity', isActive: false, element: under('activity', sentence) })
-        }
-      } else {
-        const label = index === firstUpcoming ? 'Next' : 'Later'
-        lines.push({
-          key,
-          isActive: false,
-          element: vector ? (
-            step(key, kit.open(label), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
-          ) : (
-            <Box key={key} flexDirection="row">
-              <Text dimColor>○ </Text>
-              <Text dimColor>{fit(one.name, nameWidth)}</Text>
-              <Text dimColor>{bar('░'.repeat(METER))}</Text>
-              <Text dimColor>{label}</Text>
-            </Box>
-          ),
-        })
-      }
-      for (const helper of helpersOf(one.id).filter(helper => !(foldsDone && one.status === 'done') || helper.status === 'running')) {
-        const helperKey = `helper-${helper.id}`
-        // Say "in the background" once: not when the task's own name already does.
-        const kindLabel =
-          helper.kind === 'background'
-            ? /background/i.test(helper.label)
-              ? null
-              : 'in the background'
-            : helper.type === 'general-purpose'
-              ? 'helper'
-              : helper.type
-        const details = (
-          isDetailed
-            ? [
-                kindLabel,
-                helper.model,
-                helper.effort ? `${helper.effort} effort` : null,
-                helper.tokens > 0 ? `${formatTokens(helper.tokens)} tokens` : null,
-              ]
-            : [kindLabel]
-        )
-          .filter(Boolean)
-          .join(' · ')
-        const isRunning = helper.status === 'running'
-        if (vector) {
-          // Its own small mark and a gap take two cells more.
-          const shown = fitted(helper.label, details, roomFor(2))
-          lines.push({
-            key: helperKey,
-            isActive: isRunning,
-            element: line(
-              helperKey,
-              kit.blank(),
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                {isRunning
-                  ? kit.ring(null, isCalm ? 0 : tick, 'Running', 13)
-                  : helper.status === 'failed'
-                    ? kit.badge('close', 'alert', 'Failed', 13)
-                    : kit.badge('check', 'ok', 'Done', 13)}
-                <Text wrap="truncate-end">
-                  <Text dimColor={!isRunning}>{shown.name}</Text>
-                  {shown.tail !== '' && <Text dimColor>{` · ${shown.tail}`}</Text>}
-                </Text>
-              </Box>,
-            ),
-          })
-          continue
-        }
-        const icon = isRunning ? (isCalm ? '◐' : SPINNER[tick % SPINNER.length]!) : helper.status === 'failed' ? '✗' : '✓'
-        // The whole row is the description's: "in the background" and the details go first when it is short of room.
-        const room = Math.max(4, columns - 7)
-        const hasRoom = details !== '' && widthOf(helper.label) + 1 + widthOf(details) <= room
-        lines.push({
-          key: helperKey,
-          isActive: isRunning,
-          element: (
-            <Box key={helperKey} flexDirection="row">
-              <Text dimColor>{'  ↳ '}</Text>
-              <Text color={isRunning ? 'cyan' : helper.status === 'failed' ? 'red' : 'green'}>{`${icon} `}</Text>
-              <Text dimColor={!isRunning} wrap="truncate-end">
-                {hasRoom ? helper.label : fit(helper.label, room).trimEnd()}
-              </Text>
-              {hasRoom && <Text dimColor wrap="truncate-end">{` ${details}`}</Text>}
-            </Box>
-          ),
-        })
-      }
-    })
-
-    // Window the lines so the current step (and what runs under it) stays in view,
-    // and say how many steps are out of view.
-    const focus = Math.max(0, lines.findIndex(one => one.isActive))
-    // One line of context above the current step when there is room for it.
-    const windowAt = (size: number) => Math.min(Math.max(0, focus - (size > 2 ? 1 : 0)), Math.max(0, lines.length - size))
-    const stepsIn = (from: number, to: number) =>
-      lines.slice(from, to).reduce((sum, one) => sum + (one.key.startsWith('task-') ? (one.steps ?? 1) : 0), 0)
-    const isCut = stepsIn(0, windowAt(room)) + stepsIn(windowAt(room) + room, lines.length) > 0
-    // The "more steps" line needs a row of its own; with a single row the current step wins.
-    const shown = isCut && room > 1 ? room - 1 : room
-    const first = windowAt(shown)
-    const above = stepsIn(0, first)
-    const below = stepsIn(first + shown, lines.length)
-    const rows = lines.slice(first, first + shown).map(one => one.element)
-    if (above + below > 0 && shown < room) {
-      const more = [above > 0 ? `${above} earlier` : '', below > 0 ? `${below} more ${below === 1 ? 'step' : 'steps'}` : '']
-        .filter(Boolean)
-        .join(' · ')
-      rows.push(
-        vector ? (
-          under('more', more)
-        ) : (
-          <Text key="more" dimColor wrap="truncate-end">
-            {`  … ${more}`}
-          </Text>
-        ),
+          </Box>
+        </Box>,
       )
     }
-
     return withBeneath(
       <Box flexDirection="column" width={columns}>
-        {row(header)}
-        {rows}
+        <Text bold wrap="truncate-end">{`Welcome to GlanceFlow · ${tourStep + 1} of ${TOUR.length}`}</Text>
+        <Text wrap="wrap">{TOUR[tourStep]}</Text>
+        <Box key="tour" flexDirection="row" gap={2} marginBottom={1}>
+          <Button key="tour-next" plain label={isLast ? '✓ Got it' : 'Next ▶'} onPress={() => stepTour($, tourStep + 1)} />
+          {!isLast && <Button key="tour-skip" plain label="Skip" onPress={() => stepTour($, null)} />}
+        </Box>
         {warnings}
         {actions}
       </Box>,
     )
+  }
+
+  if (list === null) {
+    const hint = vector ? 'Ask Claude for something, and its plan shows here' : 'Ask Claude for something: its plan shows here'
+    // Nothing to show yet. Elsewhere than the terminal it keeps the checklist's frame: the hint and the view on top;
+    // below, the places to go on the left and, when the chat is full, Tidy up now on the right.
+    return withBeneath(
+      <Box flexDirection="column" width={columns}>
+        {row(
+          !isEnabled ? (
+            vector ? (
+              <Text dimColor wrap="truncate-end">
+                GlanceFlow is off: Claude Code shows everything as usual
+              </Text>
+            ) : (
+              <Text> </Text>
+            )
+          ) : vector ? (
+            <Box flexDirection="row" alignItems="center" gap={1}>
+              {kit.icon('plan', 'quiet', 'No plan yet')}
+              <Text dimColor wrap="truncate-end">
+                {wholePieces([hint], headerWidth - 3)}
+              </Text>
+            </Box>
+          ) : (
+            <Text dimColor wrap="truncate-end">
+              {fit(hint, headerWidth).trimEnd()}
+            </Text>
+          ),
+        )}
+        {warnings}
+        {actions}
+      </Box>,
+    )
+  }
+
+  const elapsed = (vector ? durationWords : formatDuration)((list.finishedAt ?? current) - list.startedAt)
+  // A paused or stopped job's clock stands still at the moment it stopped.
+  const stepClock = list.finishedAt ?? current
+  const jobTokens = list.tasks.reduce((sum, one) => sum + one.tokens, list.extraTokens)
+  const jobCached = list.tasks.reduce((sum, one) => sum + one.cachedTokens, list.extraCachedTokens)
+  const spent = jobCost(list, usage)
+  const jobTokenNote = isDetailed
+    ? [tokenNote(jobTokens, jobCached), spent === null ? '' : formatCost(spent)].filter(Boolean).join(' · ')
+    : ''
+  const activeStep = list.tasks.find(one => one.status === 'active')
+  // Why Claude stopped, when it isn't working: on vector surfaces it sits beside the current step, so the header keeps
+  // to the state and the job's name; with no current step it stays in the header.
+  const limitResets = list.phase === 'stuck' && /limit/i.test(list.stuckReason ?? '') ? resetTime(usage.limitResetsAt, current) : null
+  const reason =
+    list.phase === 'stuck'
+      ? // Elsewhere than the terminal a usage limit reads as a short fact, with when it lifts where the app has told us.
+        vector && /limit/i.test(list.stuckReason ?? '')
+        ? `Usage limit reached · ${limitResets === null ? 'try again later' : `resets ${limitResets}`}`
+        : (list.stuckReason ?? FAILING)
+      : list.phase === 'stopped'
+        ? list.stopKind === 'pause'
+          ? 'press Continue to pick up'
+          : 'you pressed Esc'
+        : ''
+  const isReasonOnStep = vector && activeStep !== undefined
+  // Both views fill the current step from its time estimate, so the percentage moves before a step is checked off.
+  const activeEstimate = activeStep ? stepEstimate(list, activeStep, stepClock).percent : undefined
+  const overall = overallProgress(list.tasks, activeEstimate).percent
+  let header: RenderChildren
+  if (list.phase === 'needsYou') {
+    const reason = needsText(list) ?? PERMISSION
+    header = vector ? (
+      // The amber is in the icon; the words keep the app's text colour, which reads on a light window too.
+      headline(kit.badge('bell', 'warn', STATUS), 'Needs you', [reason], { isRestPlain: true })
+    ) : (
+      <Text wrap="truncate-end">
+        <Text bold inverse color="yellow">
+          {' Needs you '}
+        </Text>
+        <Text> {fit(reason, headerWidth - 12).trimEnd()}</Text>
+      </Text>
+    )
+  } else if (list.phase === 'stuck') {
+    header = vector ? (
+      headline(kit.badge('bang', 'alert', STATUS), 'Stuck', isReasonOnStep ? [list.title] : [reason, list.title])
+    ) : (
+      <Text wrap="truncate-end" color="yellow" bold={isCalm}>
+        {fit(`⚠ Stuck: ${list.stuckReason ?? FAILING}`, headerWidth).trimEnd()}
+      </Text>
+    )
+  } else if (list.phase === 'stopped') {
+    const isPause = list.stopKind === 'pause'
+    header = vector ? (
+      headline(
+        kit.badge(isPause ? 'pause' : 'stop', 'quiet', STATUS),
+        isPause ? 'Paused' : 'Stopped',
+        isReasonOnStep ? [list.title] : [reason, list.title],
+      )
+    ) : (
+      <Text wrap="truncate-end" dimColor={!isCalm} bold={isCalm}>
+        {fit(
+          isPause ? `‖ Paused · press Continue to pick up · ${list.title}` : `■ Stopped · you pressed Esc · ${list.title}`,
+          headerWidth,
+        ).trimEnd()}
+      </Text>
+    )
+  } else if (list.phase === 'background') {
+    const running = list.helpers.filter(one => one.status === 'running').length
+    header = vector ? (
+      headline(
+        kit.icon('clock', 'active', STATUS),
+        ['Still working in the background', 'In the background', 'Background'],
+        [`${running} left`, list.title, elapsed],
+      )
+    ) : (
+      <Text wrap="truncate-end" color="cyan" bold={isCalm}>
+        {fit(`◷ Still working in the background · ${running} left · ${list.title} · ${elapsed}`, headerWidth).trimEnd()}
+      </Text>
+    )
+  } else if (list.phase === 'done') {
+    // Whether the code the job changed was tested: outside proof, not Claude's own word.
+    const check = jobCheck(list.tasks)
+    const checkWords = check === null ? '' : CHECK_WORDS[check]
+    header = vector ? (
+      headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, checkWords, `took ${elapsed}`, jobTokenNote])
+    ) : (
+      <Text wrap="truncate-end" color="green" bold={isCalm}>
+        {fit(
+          `✓ All done · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
+          headerWidth,
+        ).trimEnd()}
+      </Text>
+    )
+  } else {
+    // Time left follows the percentage shown, so the two never disagree.
+    const left = list.hasPlan ? timeLeft(list, current, activeEstimate) : null
+    const hasGrown = list.hasPlan && list.plannedCount > 0 && list.tasks.length > list.plannedCount
+    // Time left replaces time spent once there is an estimate. Elsewhere than the terminal the ring shows the
+    // percentage, so the words count steps, as the Plan does.
+    const stepsDone = list.tasks.filter(one => one.status === 'done').length
+    const lead = list.approval === 'waiting' ? 'Plan ready' : 'Working'
+    const pieces = [
+      list.hasPlan ? (vector ? `${stepsDone} of ${list.tasks.length} done` : `${overall}%`) : '',
+      // Elsewhere than the terminal a bare "8s" could read as time left: it says so.
+      left === null ? (vector ? `${elapsed} so far` : elapsed) : `about ${formatLeft(left)} left`,
+      hasGrown ? `plan grew ${list.plannedCount} → ${list.tasks.length}` : '',
+      jobTokenNote,
+    ]
+    // Elsewhere than the terminal, where the job's name leaves no room for how far it is, the name gives way: the
+    // steps are right below it, and the Plan has it.
+    const firstPiece = pieces.find(Boolean) ?? ''
+    const roomWithTitle = headerWidth - 6 - widthOf(lead) - widthOf(list.title)
+    const keepsTitle = !vector || firstPiece === '' || widthOf(` · ${firstPiece}`) <= roomWithTitle
+    const detailRoom = !vector ? headerWidth - Math.min(list.title.length, 20) : keepsTitle ? roomWithTitle : headerWidth - 3 - widthOf(lead)
+    // Whole pieces drop off the end when there is no room, never half a word.
+    const shownDetails = headerDetails(pieces, detailRoom)
+    // Elsewhere than the terminal not even the first piece is cut.
+    const details = vector && widthOf(shownDetails) > detailRoom ? '' : shownDetails
+    header = vector ? (
+      // Every state's header reads the same way: its mark, the state in bold, then the job and how far it is.
+      headline(
+        list.hasPlan ? kit.ring(overall, 0, `${overall}% done`) : kit.ring(null, isCalm ? 0 : tick, STATUS),
+        lead,
+        keepsTitle ? ` · ${list.title}${details}` : details,
+      )
+    ) : (
+      <Text wrap="truncate-end">
+        <Text bold>{fit(list.title, Math.max(8, headerWidth - details.length)).trimEnd()}</Text>
+        <Text dimColor>{details}</Text>
+      </Text>
+    )
+  }
+
+  if (list.phase === 'done' && list.isCollapsed) {
+    return withBeneath(
+      <Box flexDirection="column" width={columns}>
+        {row(header)}
+        {warnings}
+        {actions}
+      </Box>,
+    )
+  }
+
+  // Name column: whatever the row leaves after mark, meter and label, so rows never wrap.
+  const hasMeter = columns >= METER_MIN_COLUMNS
+  const bar = (cells: string) => (hasMeter ? ` ${cells} ` : ' ')
+  const nameWidth = Math.max(4, Math.min(MAX_NAME, columns - 2 - 2 - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1))
+  const room = Math.max(1, maxRows - 1 - warnings.length - (actions ? 1 : 0))
+  const firstUpcoming = list.tasks.findIndex(one => one.status === 'upcoming')
+  // What is left of the row after mark, name, meter and label: the step's tokens, when they fit.
+  const usageRoom = columns - 2 - nameWidth - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1
+  const noteOf = (one: GlanceTask) => {
+    let timeNote = ''
+    if (one.status === 'done' && one.startedAt !== null && one.finishedAt !== null) {
+      timeNote = `took ${(vector ? durationWords : formatDuration)(one.finishedAt - one.startedAt)}`
+    } else if (one.status === 'active') {
+      const estimate = stepEstimate(list, one, stepClock)
+      // Elsewhere than the terminal the band gives the step's time left alone; the Plan keeps the time spent too.
+      timeNote = vector ? leftLabel(estimate.leftMs, true) : `${formatDuration(estimate.elapsedMs)} · ${leftLabel(estimate.leftMs)}`
+    }
+    return isDetailed ? [timeNote, tokenNote(one.tokens, one.cachedTokens)].filter(Boolean).join(' · ') : ''
+  }
+  const usageCell = (one: GlanceTask) => {
+    const note = noteOf(one)
+    return note && usageRoom >= 12 ? <Text dimColor>{` ${fit(note, usageRoom - 1).trimEnd()}`}</Text> : null
+  }
+  // A step on vector surfaces: its mark and name, then, dim, what it is doing or got done; in Details its time and
+  // tokens keep to a column on the right. A step whose mark says it all gets no word of its own.
+  // Its time follows it inline, as a finished step's does. When the row runs short the tail gives way first (it
+  // shrinks a hundred times faster than the name), and the time is never cut.
+  // What follows the name reads as the header does: parts joined by " · " with no wider gap before the dot (the
+  // spaces are no-break ones, which the app keeps at the start of a part), the bar standing in for the first.
+  const join = (words: string) => `\u00a0·\u00a0${words}`
+  // Elsewhere than the terminal a row's words are measured here, at about 0.8 of a cell a character, so the app never
+  // cuts one: past the mark (and `cells` more kept beside the name), a name too long for the row keeps whole words, and
+  // the tail keeps whole pieces in the room left after the name and the `gap` before the tail.
+  const roomFor = (cells: number) => Math.max(0, Math.floor((columns - 3 - cells) / 0.8) - 1)
+  const fitted = (name: string, tail: string, room: number, gap = 3) => {
+    const shownName = widthOf(name) <= room ? name : wholePieces([name], room)
+    return { name: shownName, tail: tail === '' ? '' : wholePieces(tail.split(' · '), room - widthOf(shownName) - gap) }
+  }
+  const step = (key: string, mark: RenderChildren, name: RenderChildren, tail: string, extra?: RenderChildren, note = '') => (
+    <Box key={key} flexDirection="row" alignItems="center" width={columns}>
+      {mark}
+      <Box flexShrink={1} minWidth={0} marginLeft={1}>
+        {name}
+      </Box>
+      {extra && <Box marginLeft={1}>{extra}</Box>}
+      {tail !== '' && (
+        <Box key="tail" flexShrink={100} minWidth={0} marginLeft={extra ? 1 : 0}>
+          <Text dimColor wrap="truncate-end">
+            {extra ? tail : join(tail)}
+          </Text>
+        </Box>
+      )}
+      {note !== '' && (
+        <Box key="note" flexShrink={0} marginLeft={tail === '' && extra ? 1 : 0}>
+          <Text dimColor>{tail === '' && extra ? note : join(note)}</Text>
+        </Box>
+      )}
+    </Box>
+  )
+  // A line under a step, in line with the step names: what it got done, what Claude is doing, what is out of view.
+  const under = (key: string, text: string) =>
+    vector ? (
+      line(
+        key,
+        kit.blank(),
+        <Text dimColor wrap="truncate-end">
+          {wholePieces(text.split(' · '), roomFor(0))}
+        </Text>,
+      )
+    ) : (
+      <Box key={key} flexDirection="row">
+        <Text dimColor wrap="truncate-end">
+          {fit(`    ${text}`, Math.max(0, columns - 1)).trimEnd()}
+        </Text>
+      </Box>
+    )
+  const lastStepId = list.tasks[list.tasks.length - 1]?.id
+  const stepIds = new Set(list.tasks.map(one => one.id))
+  const helpersOf = (stepId: string) =>
+    list.helpers
+      .filter(one => one.stepId === stepId || (stepId === lastStepId && !stepIds.has(one.stepId)))
+      // Running first, then the latest finished.
+      .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'))
+      .slice(0, HELPERS_PER_STEP)
+
+  // What the step that just finished got done, until Claude's next activity takes the line.
+  // Steps checked off together finish at the same moment: the latest in the plan wins.
+  const justDone = list.tasks
+    .filter(one => one.status === 'done' && one.finishedAt !== null)
+    .reverse()
+    .sort((a, b) => b.finishedAt! - a.finishedAt!)[0]
+  const showsSummary = (list.phase === 'working' || list.phase === 'done') && list.activity === null && Boolean(justDone?.summary)
+
+  // A long plan folds its finished steps, and the steps after the next one, into a line each.
+  const isCompact = list.tasks.length > COMPACT_AFTER
+  const doneSteps = list.tasks.filter(one => one.status === 'done')
+  const foldsDone = isCompact && doneSteps.length >= 2
+  const laterSteps = list.tasks.filter((one, index) => one.status === 'upcoming' && index !== firstUpcoming)
+  const foldsLater = isCompact && laterSteps.length >= 2
+  // Where the current step stands: the word says when Claude isn't working on it.
+  const standing =
+    list.phase === 'needsYou'
+      ? { mark: '‖ ', label: 'Waiting', icon: 'bell' as const, tone: 'warn' as const }
+      : list.phase === 'stuck'
+        ? { mark: '⚠ ', label: 'Stuck', icon: 'bang' as const, tone: 'alert' as const }
+        : list.phase === 'stopped'
+          ? list.stopKind === 'pause'
+            ? { mark: '‖ ', label: 'Paused', icon: 'pause' as const, tone: 'quiet' as const }
+            : { mark: '■ ', label: 'Stopped', icon: 'stop' as const, tone: 'quiet' as const }
+          : null
+
+  // Every line: each step, then the helpers working under it.
+  // `steps`: how many plan steps a line stands for (a folded line stands for several).
+  const lines: { key: string; isActive: boolean; element: RenderChildren; steps?: number }[] = []
+  list.tasks.forEach((one, index) => {
+    const key = `task-${index}`
+    if (one.status === 'done' && foldsDone) {
+      if (one !== doneSteps[0]) return
+      const words = `${doneSteps.length} steps done`
+      lines.push({
+        key,
+        steps: doneSteps.length,
+        isActive: false,
+        element: vector ? (
+          // A summary of steps, not a step: its own quiet mark, so the tick and the ring stay for real steps.
+          step(
+            key,
+            kit.icon('more', 'quiet', 'Folded'),
+            <Text dimColor wrap="truncate-end">
+              {fitted(words, '', roomFor(0)).name}
+            </Text>,
+            '',
+          )
+        ) : (
+          <Box key={key} flexDirection="row">
+            <Text color="green">✓ </Text>
+            <Text dimColor>{fit(words, nameWidth)}</Text>
+            <Text color="green">{bar('█'.repeat(METER))}</Text>
+            <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
+          </Box>
+        ),
+      })
+      // A summary under a folded group would hang under the wrong line: the terminal keeps it, elsewhere it goes.
+      if (showsSummary && justDone && !vector) {
+        lines.push({ key: 'summary', isActive: false, element: under('summary', justDone.summary!) })
+      }
+      return
+    }
+    if (one.status === 'upcoming' && foldsLater && index !== firstUpcoming) {
+      if (one !== laterSteps[0]) return
+      // Elsewhere than the terminal the row says where the rest are.
+      const words = vector ? `${laterSteps.length} more steps in Plan` : `${laterSteps.length} more steps`
+      lines.push({
+        key,
+        steps: laterSteps.length,
+        isActive: false,
+        element: vector ? (
+          step(
+            key,
+            kit.icon('more', 'quiet', 'Folded'),
+            <Text dimColor wrap="truncate-end">
+              {fitted(words, '', roomFor(0)).name}
+            </Text>,
+            '',
+          )
+        ) : (
+          <Box key={key} flexDirection="row">
+            <Text dimColor>○ </Text>
+            <Text dimColor>{fit(words, nameWidth)}</Text>
+            <Text dimColor>{bar('░'.repeat(METER))}</Text>
+            <Text dimColor>Later</Text>
+          </Box>
+        ),
+      })
+      return
+    }
+    if (one.status === 'done') {
+      // Its time follows it, dim: kept to the far right it read as the time left.
+      const done = fitted(one.name, [showsSummary && one === justDone ? one.summary! : '', noteOf(one)].filter(Boolean).join(' · '), roomFor(0))
+      lines.push({
+        key,
+        isActive: false,
+        element: vector ? (
+          step(
+            key,
+            kit.icon('done', 'ok', 'Done'),
+            <Text dimColor wrap="truncate-end">
+              {done.name}
+            </Text>,
+            done.tail,
+          )
+        ) : (
+          <Box key={key} flexDirection="row">
+            <Text color="green">✓ </Text>
+            <Text dimColor>{fit(one.name, nameWidth)}</Text>
+            <Text color="green">{bar('█'.repeat(METER))}</Text>
+            <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
+            {usageCell(one)}
+          </Box>
+        ),
+      })
+      if (showsSummary && one === justDone && !vector) {
+        lines.push({ key: 'summary', isActive: false, element: under('summary', one.summary!) })
+      }
+    } else if (one.status === 'active') {
+      // The details view fills the bar gradually from the time estimate; the simple view sweeps until Claude reports.
+      const shownPercent = isDetailed ? stepEstimate(list, one, stepClock).percent : one.percent
+      // Elsewhere than the terminal a bar shows only while Claude works on the step: a frozen one says nothing.
+      const hasPercent = (isDetailed || one.hasReported) && !(vector && standing !== null)
+      const label = standing?.label ?? (hasPercent ? `${shownPercent}%` : 'Working')
+      // Only a step Claude is working on moves; one that waits on you or has stopped stands still.
+      const isStill = isCalm || standing !== null
+      let element: RenderChildren
+      if (vector && list.approval === 'waiting') {
+        // Nothing has started while the plan waits for Start: the first step is one more to come, and the amber of
+        // the header is the only call on you.
+        element = step(key, kit.open('Next'), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
+      } else if (vector) {
+        // The bar shows how far the step is, so no number stands beside it; a step that waits on you or has stopped
+        // goes grey, the header saying why. With no progress reported yet there is no bar, only what Claude is
+        // doing, in its own words when they fit.
+        const activity = list.phase === 'working' ? list.activity : null
+        const doing =
+          activity === null
+            ? ''
+            : activity.detail !== null && widthOf(activity.detail) <= 48
+              ? activity.detail
+              : `${activity.label}${activity.count > 1 ? ` (${activity.count})` : ''}`
+        // Before Claude reports how far it is, a short bar travels along the track: the row reads as every working
+        // row does, and no word repeats the header. A calm screen keeps still, so it shows no bar then.
+        const isSweeping = standing === null && !hasPercent && !isCalm
+        const tail = isReasonOnStep && reason !== '' ? reason.charAt(0).toUpperCase() + reason.slice(1) : doing
+        const note = noteOf(one)
+        // A few letters of what Claude is doing say nothing: it shows only where a dozen or more fit. Why the step
+        // stopped always shows; the header no longer says it.
+        const tailRoom = columns - 3 - widthOf(one.name) - (hasPercent || isSweeping ? 10 : 0) - (note !== '' ? widthOf(note) + 3 : 0)
+        // The bar takes 8 cells and a cell either side; the time beside it is never cut.
+        const hasBar = hasPercent || isSweeping
+        const shown = fitted(
+          one.name,
+          tailRoom >= 14 || (isReasonOnStep && reason !== '') ? tail : '',
+          roomFor(hasBar ? 10 : 0) - (note !== '' ? widthOf(note) + 3 : 0),
+          hasBar ? 0 : 3,
+        )
+        // The bar says how far the step is, so the mark beside the name says Now, as the Plan's does, not that again.
+        element = step(
+          key,
+          kit.badge(standing?.icon ?? 'play', standing?.tone ?? 'active', standing?.label ?? 'Now'),
+          <Text bold wrap="truncate-end">
+            {shown.name}
+          </Text>,
+          shown.tail,
+          hasPercent || isSweeping ? (
+            <Box key="state" flexDirection="row" alignItems="center" flexShrink={0}>
+              {hasPercent
+                ? kit.meter('active', shownPercent, 0, label, 72)
+                : kit.meter('active', null, ((tick % 12) + 0.5) / 12, label, 72)}
+            </Box>
+          ) : undefined,
+          note,
+        )
+      } else {
+        const filled = Math.round(shownPercent / 10)
+        const sweepAt = tick % (METER + 3)
+        const meter = hasPercent
+          ? '█'.repeat(filled) + '░'.repeat(METER - filled)
+          : isStill
+            ? '░'.repeat(METER)
+            : Array.from({ length: METER }, (_, cell) => (cell >= sweepAt - 2 && cell <= sweepAt ? '█' : '░')).join('')
+        element = (
+          <Box key={key} flexDirection="row">
+            <Text color={standing?.label === 'Stuck' ? 'yellow' : 'cyan'}>{standing?.mark ?? '▶ '}</Text>
+            <Text bold>{fit(one.name, nameWidth)}</Text>
+            <Text color="cyan">{bar(meter)}</Text>
+            <Text>{fit(label, LABEL_WIDTH)}</Text>
+            {usageCell(one)}
+          </Box>
+        )
+      }
+      lines.push({ key, isActive: true, element })
+      // What Claude is doing right now, in plain words: a line of its own on the terminal; elsewhere it follows the bar.
+      if (list.phase === 'working' && list.activity !== null && !vector) {
+        const { label: doing, count, detail } = list.activity
+        const plain = `${doing}${count > 1 ? ` (${count})` : ''}`
+        // Claude's own sentence when it fits the line whole; otherwise the short plain label, never a cut sentence.
+        const sentence = detail !== null && widthOf(`    Now: ${detail}`) <= columns - 1 ? `Now: ${detail}` : plain
+        lines.push({ key: 'activity', isActive: false, element: under('activity', sentence) })
+      }
+    } else {
+      const label = index === firstUpcoming ? 'Next' : 'Later'
+      lines.push({
+        key,
+        isActive: false,
+        element: vector ? (
+          step(key, kit.open(label), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
+        ) : (
+          <Box key={key} flexDirection="row">
+            <Text dimColor>○ </Text>
+            <Text dimColor>{fit(one.name, nameWidth)}</Text>
+            <Text dimColor>{bar('░'.repeat(METER))}</Text>
+            <Text dimColor>{label}</Text>
+          </Box>
+        ),
+      })
+    }
+    for (const helper of helpersOf(one.id).filter(helper => !(foldsDone && one.status === 'done') || helper.status === 'running')) {
+      const helperKey = `helper-${helper.id}`
+      // Say "in the background" once: not when the task's own name already does.
+      const kindLabel =
+        helper.kind === 'background'
+          ? /background/i.test(helper.label)
+            ? null
+            : 'in the background'
+          : helper.type === 'general-purpose'
+            ? 'helper'
+            : helper.type
+      const details = (
+        isDetailed
+          ? [
+              kindLabel,
+              helper.model,
+              helper.effort ? `${helper.effort} effort` : null,
+              helper.tokens > 0 ? `${formatTokens(helper.tokens)} tokens` : null,
+            ]
+          : [kindLabel]
+      )
+        .filter(Boolean)
+        .join(' · ')
+      const isRunning = helper.status === 'running'
+      if (vector) {
+        // Its own small mark and a gap take two cells more.
+        const shown = fitted(helper.label, details, roomFor(2))
+        lines.push({
+          key: helperKey,
+          isActive: isRunning,
+          element: line(
+            helperKey,
+            kit.blank(),
+            <Box flexDirection="row" alignItems="center" gap={1}>
+              {isRunning
+                ? kit.ring(null, isCalm ? 0 : tick, 'Running', 13)
+                : helper.status === 'failed'
+                  ? kit.badge('close', 'alert', 'Failed', 13)
+                  : kit.badge('check', 'ok', 'Done', 13)}
+              <Text wrap="truncate-end">
+                <Text dimColor={!isRunning}>{shown.name}</Text>
+                {shown.tail !== '' && <Text dimColor>{` · ${shown.tail}`}</Text>}
+              </Text>
+            </Box>,
+          ),
+        })
+        continue
+      }
+      const icon = isRunning ? (isCalm ? '◐' : SPINNER[tick % SPINNER.length]!) : helper.status === 'failed' ? '✗' : '✓'
+      // The whole row is the description's: "in the background" and the details go first when it is short of room.
+      const room = Math.max(4, columns - 7)
+      const hasRoom = details !== '' && widthOf(helper.label) + 1 + widthOf(details) <= room
+      lines.push({
+        key: helperKey,
+        isActive: isRunning,
+        element: (
+          <Box key={helperKey} flexDirection="row">
+            <Text dimColor>{'  ↳ '}</Text>
+            <Text color={isRunning ? 'cyan' : helper.status === 'failed' ? 'red' : 'green'}>{`${icon} `}</Text>
+            <Text dimColor={!isRunning} wrap="truncate-end">
+              {hasRoom ? helper.label : fit(helper.label, room).trimEnd()}
+            </Text>
+            {hasRoom && <Text dimColor wrap="truncate-end">{` ${details}`}</Text>}
+          </Box>
+        ),
+      })
+    }
   })
+
+  // Window the lines so the current step (and what runs under it) stays in view,
+  // and say how many steps are out of view.
+  const focus = Math.max(0, lines.findIndex(one => one.isActive))
+  // One line of context above the current step when there is room for it.
+  const windowAt = (size: number) => Math.min(Math.max(0, focus - (size > 2 ? 1 : 0)), Math.max(0, lines.length - size))
+  const stepsIn = (from: number, to: number) =>
+    lines.slice(from, to).reduce((sum, one) => sum + (one.key.startsWith('task-') ? (one.steps ?? 1) : 0), 0)
+  const isCut = stepsIn(0, windowAt(room)) + stepsIn(windowAt(room) + room, lines.length) > 0
+  // The "more steps" line needs a row of its own; with a single row the current step wins.
+  const shown = isCut && room > 1 ? room - 1 : room
+  const first = windowAt(shown)
+  const above = stepsIn(0, first)
+  const below = stepsIn(first + shown, lines.length)
+  const rows = lines.slice(first, first + shown).map(one => one.element)
+  if (above + below > 0 && shown < room) {
+    const more = [above > 0 ? `${above} earlier` : '', below > 0 ? `${below} more ${below === 1 ? 'step' : 'steps'}` : '']
+      .filter(Boolean)
+      .join(' · ')
+    rows.push(
+      vector ? (
+        under('more', more)
+      ) : (
+        <Text key="more" dimColor wrap="truncate-end">
+          {`  … ${more}`}
+        </Text>
+      ),
+    )
+  }
+
+  return withBeneath(
+    <Box flexDirection="column" width={columns}>
+      {row(header)}
+      {rows}
+      {warnings}
+      {actions}
+    </Box>,
+  )
 }
