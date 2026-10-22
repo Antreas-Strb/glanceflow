@@ -420,6 +420,57 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
   return null
 }
 
+// What each activity asks to do, as the words after "OK to"; with a file or site, its name follows.
+const ASKS: Record<string, string> = {
+  'Reading files': 'read',
+  'Searching the project': 'search the project',
+  'Editing files': 'edit',
+  'Writing files': 'write',
+  'Reading a web page': 'read a page on',
+  'Searching the web': 'search the web',
+  'Using a connected app': 'use a connected app',
+  'Running the tests': 'run the tests',
+  'Installing packages': 'install packages',
+  'Working with git': 'run a git command',
+  'Building the project': 'build the project',
+  'Running a command': 'run a command',
+}
+
+// What a command does that a person should know before saying yes.
+// shortcut: reads the command's first line as text, as the activity keeps it; add a spelling here when a risky one shows up.
+const RISKS: readonly (readonly [RegExp, string])[] = [
+  [/\brm\s+-\w*[rf]|\brmdir\b|\bRemove-Item\b|\bgit\s+clean\b/i, 'deletes files'],
+  [/\bgit\s+(?:reset\s+--hard|push\s+(?:-f\b|--force)|rebase\b)/i, 'rewrites git history'],
+  [/\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bgh\s+release\s+create\b/i, 'publishes a package'],
+  [/\bgit\s+push\b|\bgh\s+pr\s+merge\b/i, 'uploads your changes'],
+  [/\bdeploy\b|\bvercel\b.*--prod/i, 'deploys online'],
+  [/\b(?:npm|pnpm|yarn|bun|pip3?|brew|cargo|gem)\s+(?:install|add|i)\b/i, 'installs packages'],
+  [/\bsudo\b/, 'uses admin rights'],
+  [/\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, 'runs code from the internet'],
+]
+
+/**
+ * What a permission request asks, in plain words: Claude's own description of the call, else what it does and to
+ * what, then anything risky the command does. Null when nothing is known about the call.
+ */
+export function permissionWords(activity: GlanceChecklist['activity']): string | null {
+  if (activity === null) return null
+  const asks = ASKS[activity.label]
+  const isCommand = activity.label.startsWith('Running') || activity.label === 'Installing packages' || activity.label === 'Working with git' || activity.label === 'Building the project'
+  const what = activity.detail
+    ? `${activity.detail.charAt(0).toLowerCase()}${activity.detail.slice(1).replace(/[.!]+$/, '')}`
+    : asks === undefined
+      ? null
+      : !isCommand && activity.target
+        ? `${asks} ${activity.target}`
+        : asks
+  if (what === null) return null
+  const risks = isCommand && activity.target ? RISKS.filter(([pattern]) => pattern.test(activity.target!)).map(([, words]) => words) : []
+  const and = risks.length > 1 ? `${risks.slice(0, -1).join(', ')} and ${risks[risks.length - 1]}` : (risks[0] ?? '')
+
+  return `OK to ${what}?${and ? ` It ${and}.` : ''}`
+}
+
 // A piece that starts with a test, build, type check or lint command, after any VAR=x assignments. Stricter than
 // activityOf's words: git commit -m "fix test", cat tests/x.ts and npm install jest run no check.
 // shortcut: reads the command as text; a check run through a script, an alias or a wrapper like sh -c is not seen,

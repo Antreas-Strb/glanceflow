@@ -81,6 +81,7 @@ import {
   otherChatsWords,
   overallProgress,
   ownWords,
+  permissionWords,
   prettyModel,
   projectPath,
   questionOf,
@@ -2176,7 +2177,8 @@ export function registerGlance(on: On): void {
   on('classic.Notification', async ($, e, next) => {
     const kind = String(e.notification_type ?? '')
     if (/permission/i.test(kind)) {
-      await setNeedsYou($, PERMISSION)
+      // What the waiting call asks, in plain words, beside Claude Code's own dialog with the raw command.
+      await setNeedsYou($, permissionWords((await read($, checklistAtom))?.activity ?? null) ?? PERMISSION)
     } else if (/elicitation|question/i.test(kind)) {
       await setNeedsYou($, QUESTION)
     }

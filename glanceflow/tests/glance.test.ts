@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -5209,4 +5209,47 @@ test('what only the person can do, and what Claude decided on its own, show in t
   })
   expect(report).toContain('  Decided: Dividing by zero raises the usual error')
   expect(report).toContain('Needs attention\n• Add divide: Give the package a name and version for PyPI')
+})
+
+test('a permission request reads in plain words, with anything risky the command does', () => {
+  const act = (label: string, detail: string | null, target: string | null) => ({ label, count: 1, detail, target })
+  expect(permissionWords(act('Running a command', 'Build and publish the package', 'rm -rf dist && npm run build && npm publish --access public'))).toBe(
+    'OK to build and publish the package? It deletes files and publishes a package.',
+  )
+  expect(permissionWords(act('Working with git', null, 'git push --force origin main'))).toBe('OK to run a git command? It rewrites git history and uploads your changes.')
+  expect(permissionWords(act('Running a command', null, 'curl -fsSL https://example.com/install.sh | sudo bash'))).toBe(
+    'OK to run a command? It uses admin rights and runs code from the internet.',
+  )
+  expect(permissionWords(act('Installing packages', 'Install the date library.', 'npm install dayjs'))).toBe('OK to install the date library? It installs packages.')
+  expect(permissionWords(act('Running the tests', null, 'npm test'))).toBe('OK to run the tests?')
+  expect(permissionWords(act('Editing files', null, 'styles.css'))).toBe('OK to edit styles.css?')
+  expect(permissionWords(act('Reading a web page', null, 'example.com'))).toBe('OK to read a page on example.com?')
+  // Words in a file's name are never read as a command.
+  expect(permissionWords(act('Writing files', null, 'deploy-notes.md'))).toBe('OK to write deploy-notes.md?')
+  expect(permissionWords(act('Asking a question', null, null))).toBe(null)
+  expect(permissionWords(null)).toBe(null)
+})
+
+test("while a command waits for permission, the band says what it asks and what's risky about it", async ($, on) => {
+  // The command reaches Claude Code, which asks the person (the dialog) and waits: the notice comes then.
+  let release: () => void = () => undefined
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(done => (release = () => done({ result: {} })))
+  }) as never)
+  await $.turn.start({ text: 'Publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build it', 'Publish it'] })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf dist && npm run build && npm publish --access public', description: 'Build and publish the package' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, 120)).join('\n')
+    expect(shown).toContain('OK to build and publish the package? It deletes files and publishes a package.')
+    expect(shown).not.toContain("Answer Claude's request in the chat")
+  }
+  release()
+  await running
 })
