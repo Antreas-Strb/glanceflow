@@ -3753,11 +3753,15 @@ test("a new job starts without reading History: the project's pace is learned on
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('classic.Notification', () => ({}) as never)
-  const job = async (turnId: string, finish: boolean) => {
+  // A planned job that finishes with timed steps, a quick answer with no plan, or a planned job left open.
+  const job = async (turnId: string, kind: 'finished' | 'quick' | 'open') => {
     await $.turn.start({ text: `Build my landing page ${turnId}`, turnId })
-    await callTool($, { tool: PLAN, steps: ['Read notes', 'Write copy', 'Add form', 'Polish it'], sizes: ['S', 'M', 'M', 'L'] })
-    const shown = (await texts($, 'terminal')).join('\n')
-    if (finish) {
+    let shown = ''
+    if (kind !== 'quick') {
+      await callTool($, { tool: PLAN, steps: ['Read notes', 'Write copy', 'Add form', 'Polish it'], sizes: ['S', 'M', 'M', 'L'] })
+      shown = (await texts($, 'terminal')).join('\n')
+    }
+    if (kind === 'finished') {
       for (const task of ['Read notes', 'Write copy', 'Add form', 'Polish it']) {
         await clock.advance(60_000)
         await callTool($, { tool: PROGRESS, task, percent: 100 })
@@ -3768,15 +3772,15 @@ test("a new job starts without reading History: the project's pace is learned on
   }
 
   // The first job shows at once and gets the pace as soon as History is read: 8 units at 1 minute a unit.
-  expect(await job('t1', true)).toContain('about 8m left')
+  expect(await job('t1', 'finished')).toContain('about 8m left')
   expect(historyReads).toBeGreaterThan(0)
-  // t1 finished with timed steps, so t2 learns the pace again; t2 changes nothing, so t3 reads only its own day, to
-  // record itself.
+  // t1 finished with timed steps, so t2 learns the pace again. t2, a quick answer, doesn't change it, so t3 reads
+  // only its own day, to record itself.
   historyReads = 0
-  await job('t2', false)
+  await job('t2', 'quick')
   expect(historyReads).toBeGreaterThan(1)
   historyReads = 0
-  expect(await job('t3', false)).toMatch(/about \d+m left/)
+  expect(await job('t3', 'open')).toMatch(/about \d+m left/)
   expect(historyReads).toBe(1)
 })
 

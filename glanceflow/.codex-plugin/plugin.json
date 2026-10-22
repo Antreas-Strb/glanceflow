@@ -1,6 +1,6 @@
 {
   "name": "glanceflow",
-  "version": "0.25.3",
+  "version": "0.26.0",
   "description": "A plain-English checklist above the prompt for Claude Code. Requires Claude Code; it does not run in Codex. This manifest only carries the listing links registries read.",
   "author": {
     "name": "Antreas-Strb"
