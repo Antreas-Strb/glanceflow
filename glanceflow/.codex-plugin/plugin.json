@@ -1,0 +1,20 @@
+{
+  "name": "glanceflow",
+  "version": "0.25.3",
+  "description": "A plain-English checklist above the prompt for Claude Code. Requires Claude Code; it does not run in Codex. This manifest only carries the listing links registries read.",
+  "author": {
+    "name": "Antreas-Strb"
+  },
+  "interface": {
+    "displayName": "GlanceFlow",
+    "shortDescription": "See what Claude Code is doing, at a glance (Claude Code only)",
+    "longDescription": "GlanceFlow is a mod for Claude Code, not Codex. It replaces the wall of tool calls with one plain-English checklist above the prompt: the plan, live progress, whether changed code was tested, when Claude needs you, history and a team report. Install it in Claude Code with /plugin marketplace add Antreas-Strb/glanceflow.",
+    "developerName": "Antreas-Strb",
+    "category": "Productivity",
+    "capabilities": [],
+    "websiteURL": "https://github.com/Antreas-Strb/glanceflow",
+    "privacyPolicyURL": "https://github.com/Antreas-Strb/glanceflow/blob/master/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Antreas-Strb/glanceflow/blob/master/TERMS.md",
+    "supportURL": "https://github.com/Antreas-Strb/glanceflow/discussions"
+  }
+}

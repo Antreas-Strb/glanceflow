@@ -201,4 +201,4 @@ The secret and personal-detail patterns in `glanceflow/hooks/privacy.ts` are ada
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Third-party code is listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+MIT. See [LICENSE](LICENSE). Third-party code is listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). What GlanceFlow keeps and sends is in [PRIVACY.md](PRIVACY.md), and the terms of use are in [TERMS.md](TERMS.md).
