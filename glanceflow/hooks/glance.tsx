@@ -987,8 +987,13 @@ const addTokens = ($: $, agentId: string | undefined, usage: StepUsage) => {
 
 /** Shows a helper's own transcript in the main view, as Claude Code's tasks list does. */
 const openHelper = async ($: $, agentId: string) => {
-  const shown = await $.ui.view({ agentId }).catch((error: unknown) => ({ deny: String(error) }))
-  if ('deny' in shown && shown.deny) $.ui.toast(`Couldn't open that helper: ${shown.deny}`)
+  try {
+    const shown = await $.ui.view({ agentId })
+    if ('deny' in shown && shown.deny) $.ui.toast(`Couldn't open that helper: ${shown.deny}`)
+  } catch (error) {
+    // A Claude Code older than the view has no $.ui.view to call.
+    $.ui.toast(`Couldn't open that helper: ${error instanceof TypeError ? 'this needs a newer Claude Code' : String(error)}`)
+  }
 }
 
 /** Stops one helper or task working in the background, with Claude Code's own TaskStop; Claude carries on. */
