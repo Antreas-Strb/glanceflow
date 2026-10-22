@@ -9,6 +9,7 @@ import type {
   GlanceHistoryView,
   GlancePhase,
   GlanceTask,
+  GlanceUpdate,
   GlanceUsage,
 } from '../types'
 import {
@@ -66,6 +67,7 @@ import {
   isFinished,
   isLatinText,
   isMcpMergeAction,
+  isNewerVersion,
   isStartWords,
   jobCheck,
   jobCost,
@@ -215,6 +217,7 @@ const PLAN_PANE = 'glanceflow-plan'
 const RECAP_PANE = 'glanceflow-recap'
 const SETTINGS_PANE = 'glanceflow-settings'
 const handoffAtom = atom({ plugin: 'glanceflow', key: 'handoffState' } as const, 'idle')
+const updateAtom = atom({ plugin: 'glanceflow', key: 'update' } as const, { state: 'idle', latest: null, id: null } as GlanceUpdate)
 const HANDOFF_CONFIRM_MS = 8000
 // What the Continue button sends, as the person's own words; turn.start knows it and keeps the job going.
 const CONTINUE_TEXT = 'Please continue where you left off.'
@@ -1179,6 +1182,79 @@ const resetSettings = async ($: $) => {
 }
 
 const showSettings = ($: $) => $.ui.open({ id: SETTINGS_PANE, title: 'GlanceFlow settings', closeOnEscape: true })
+
+// This copy's version, from its own plugin.json, read once; null when it can't be read.
+let ownVersion: string | null | undefined
+const readVersion = async ($: $) => {
+  if (ownVersion === undefined) {
+    try {
+      const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)) as { version?: unknown }
+      ownVersion = typeof manifest.version === 'string' && manifest.version ? manifest.version : null
+    } catch {
+      ownVersion = null
+    }
+  }
+  return ownVersion
+}
+
+// Claude Code has no update call for a mod, so checking and updating run its own plugin commands, and only when the
+// person presses the button: GlanceFlow makes no network request of its own.
+// shortcut: needs `claude` on the app's PATH; when it isn't, the Version row gives the command to run instead.
+const claudeJson = async ($: $, args: string[]): Promise<unknown> => {
+  const { exitCode, stdout } = await $.process.run(['claude', ...args], { timeoutMs: 60_000 })
+  if (exitCode !== 0) throw new Error(`claude ${args.join(' ')} failed`)
+  return JSON.parse(stdout)
+}
+const setUpdate = ($: $, next: GlanceUpdate) => update($, updateAtom, () => next)
+
+/** Fetches this install's marketplace and reads the newest GlanceFlow in it. */
+const checkForUpdate = async ($: $) => {
+  await setUpdate($, { state: 'checking', latest: null, id: null })
+  try {
+    const installed = (await claudeJson($, ['plugin', 'list', '--json'])) as { id: string; installPath?: string; enabled?: boolean }[]
+    const mine =
+      installed.find(one => one.installPath === $.plugin.root) ?? installed.find(one => one.id.startsWith(`${PLUGIN}@`) && one.enabled)
+    // Loaded from a folder (a checkout, or --plugin-dir): it updates where it lives, not from a marketplace.
+    if (!mine || mine.id.endsWith('@inline') || !mine.id.includes('@')) {
+      await setUpdate($, { state: 'folder', latest: null, id: null })
+      return
+    }
+    const marketplace = mine.id.slice(mine.id.indexOf('@') + 1)
+    const fetched = await $.process.run(['claude', 'plugin', 'marketplace', 'update', marketplace], { timeoutMs: 120_000 })
+    if (fetched.exitCode !== 0) throw new Error('marketplace update failed')
+    const { available } = (await claudeJson($, ['plugin', 'list', '--available', '--json'])) as {
+      available: { pluginId: string; version?: string | null; source?: unknown }[]
+    }
+    const entry = available.find(one => one.pluginId === mine.id)
+    // The catalog names a version only when the marketplace lists one; otherwise the plugin's own manifest in it says.
+    let latest = entry?.version ?? null
+    if (latest === null && typeof entry?.source === 'string') {
+      const markets = (await claudeJson($, ['plugin', 'marketplace', 'list', '--json'])) as { name: string; installLocation?: string }[]
+      const location = markets.find(one => one.name === marketplace)?.installLocation
+      if (location) latest = (JSON.parse(await $.fs.read(`${location}/${entry.source}/.claude-plugin/plugin.json`)) as { version?: string }).version ?? null
+    }
+    if (!latest) throw new Error('no version found')
+    const current = await readVersion($)
+    await setUpdate($, { state: current !== null && isNewerVersion(latest, current) ? 'available' : 'latest', latest, id: mine.id })
+  } catch {
+    await setUpdate($, { state: 'failed', latest: null, id: null })
+  }
+}
+
+/** Installs the newer GlanceFlow found; a new chat loads it. */
+const installUpdate = async ($: $) => {
+  const found = await read($, updateAtom)
+  if (found.state !== 'available' || found.id === null) return
+  await setUpdate($, { ...found, state: 'updating' })
+  try {
+    const { exitCode } = await $.process.run(['claude', 'plugin', 'update', found.id], { timeoutMs: 120_000 })
+    if (exitCode !== 0) throw new Error('update failed')
+    await setUpdate($, { ...found, state: 'updated' })
+    $.ui.toast(`GlanceFlow ${found.latest} is installed. Open a new chat to use it.`)
+  } catch {
+    await setUpdate($, { ...found, state: 'failed' })
+  }
+}
 
 /** The one button: Simple → Details → Off → Simple. */
 const cycleMode = async ($: $, isEnabled: boolean, isDetailed: boolean) => {
@@ -2145,6 +2221,8 @@ export function registerGlance(on: On): void {
     const tidyAt = await read($, tidyAtAtom)
     const checkpointAt = await read($, checkpointAtom)
     const usage = await read($, usageAtom)
+    const version = await readVersion($)
+    const found = await read($, updateAtom)
     const columns = Math.max(30, e.props.bodyColumns)
     const rule = '─'.repeat(Math.min(columns, 64))
 
@@ -2222,6 +2300,23 @@ export function registerGlance(on: On): void {
       voice: 'The chime, and a few words like "Claude needs you".',
     }[sound]
     const chatFull = usage.contextPercent === null ? null : Math.round(usage.contextPercent)
+    const updateCommand = `claude plugin update ${found.id ?? `${PLUGIN}@claude-mods`}`
+    const updateHelp = {
+      idle: 'Checking fetches the newest GlanceFlow from the marketplace you installed it from.',
+      checking: 'Checking for a newer version…',
+      latest: 'You have the newest version.',
+      available: `GlanceFlow ${found.latest} is out. Update installs it; a new chat then uses it.`,
+      updating: `Installing GlanceFlow ${found.latest}…`,
+      updated: `GlanceFlow ${found.latest} is installed. Open a new chat to use it.`,
+      folder: 'This copy runs from a folder, not a marketplace, so it updates where it lives (with git pull, say).',
+      failed: `Couldn't check or update from here. In a terminal, run: ${updateCommand}`,
+    }[found.state]
+    const updateButton =
+      found.state === 'available' ? (
+        <Button key="update" label={`Update to ${found.latest}`} variant="primary" onPress={() => installUpdate($)} />
+      ) : found.state === 'idle' || found.state === 'latest' || found.state === 'failed' ? (
+        <Button key="update" label={found.state === 'idle' ? 'Check for updates' : 'Check again'} onPress={() => checkForUpdate($)} />
+      ) : null
     const tidyHelp =
       tidyAt === 0
         ? 'GlanceFlow never offers to tidy up. Claude Code still compacts on its own when the chat is full.'
@@ -2350,6 +2445,14 @@ export function registerGlance(on: On): void {
               {checkpointAt !== null && <Button key="recap" label="Where we left off" onPress={() => showRecap($)} />}
             </Box>
           </Box>,
+        )}
+        {group(
+          'version',
+          'spark',
+          'Version',
+          version ?? '',
+          updateButton ?? <Box key="update-none" />,
+          version === null ? updateHelp : `GlanceFlow ${version}. ${updateHelp}`,
         )}
         {!vector && <Text dimColor>{rule}</Text>}
         <Box key="actions" flexDirection="row" gap={1} marginTop={vector ? 2 : 0} justifyContent={vector ? 'flex-end' : undefined} width={vector ? columns : undefined}>

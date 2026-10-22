@@ -26,6 +26,13 @@ export type GlanceTask = {
   check?: GlanceCheck
 }
 
+/** Checking for and installing a newer GlanceFlow: the newest version found, and the install it was found for (`glanceflow@marketplace`). */
+export type GlanceUpdate = {
+  state: 'idle' | 'checking' | 'latest' | 'available' | 'updating' | 'updated' | 'folder' | 'failed'
+  latest: string | null
+  id: string | null
+}
+
 /** A step's code: checked by a test, build or type check that passed, one that failed, or not checked since it changed. */
 export type GlanceCheck = 'passed' | 'failed' | 'unchecked'
 
@@ -201,6 +208,8 @@ declare module 'claude-code' {
       historyView: GlanceHistoryView | null
       /** The Fresh chat button: `working` while the handoff note is written. */
       handoffState: 'idle' | 'working'
+      /** Settings' Version row: where checking for an update, or installing one, stands. */
+      update: GlanceUpdate
       /** The button that waits for a second press to confirm, if any. */
       armedButton: 'handoff' | 'ship' | null
       /** Alerts: `chime` plays a short sound when Claude needs you, gets stuck or finishes a long job; `voice` also says it. */

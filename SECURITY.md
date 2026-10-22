@@ -17,7 +17,7 @@ Say what you found, how to reproduce it, and which version you use. You'll get a
 
 ## What GlanceFlow touches
 
-- It runs inside Claude Code as a mod and makes no network requests of its own. It asks Claude, through Claude Code, for short texts such as a job's title, a handoff note or a checkpoint.
+- It runs inside Claude Code as a mod and makes no network requests of its own. Only when you press **Check for updates** or **Update** in Settings does it run Claude Code's own `claude plugin` commands, which fetch its marketplace and install the update. It asks Claude, through Claude Code, for short texts such as a job's title, a handoff note or a checkpoint.
 - For sounds and desktop notices, when you turn them on, it runs your computer's own sound and notification programs.
 - Its history stays on your computer, in Claude Code's plugin store, for 30 days.
 - It reads tool calls to show progress, and your messages to hold back one that looks like it contains a password or key. It masks emails, phone numbers, keys and card numbers on screen.

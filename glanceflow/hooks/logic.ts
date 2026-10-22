@@ -463,6 +463,16 @@ export const needsCheck = (path: string) => !/\.(?:md|mdx|txt|rst)$/i.test(path)
 export const applyCheck = (tasks: GlanceTask[], result: GlanceCheck): GlanceTask[] =>
   tasks.map(one => (one.check === undefined || (one.check === 'passed' && result === 'failed') ? one : { ...one, check: result }))
 
+/** Whether version `latest` (like 0.27.0) comes after `current`; a part that isn't a number counts as 0. */
+export function isNewerVersion(latest: string, current: string): boolean {
+  const a = latest.split('.').map(part => Number.parseInt(part, 10) || 0)
+  const b = current.split('.').map(part => Number.parseInt(part, 10) || 0)
+  for (let at = 0; at < Math.max(a.length, b.length); at++) {
+    if ((a[at] ?? 0) !== (b[at] ?? 0)) return (a[at] ?? 0) > (b[at] ?? 0)
+  }
+  return false
+}
+
 /** A job's cost in plain dollars: "$0.42", or "<$0.01" for less than a cent. */
 export function formatCost(usd: number): string {
   return usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`
