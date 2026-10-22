@@ -1,6 +1,9 @@
-import type { GlanceChecklist, GlanceHelper, GlanceHistoryView, GlanceOtherChat, GlanceTask, GlanceTaskSize, GlanceUsage } from '../types'
+import type { GlanceCheck, GlanceChecklist, GlanceHelper, GlanceHistoryView, GlanceOtherChat, GlanceTask, GlanceTaskSize, GlanceUsage } from '../types'
 import { SIZE_WEIGHT, teamReport, weekSummary } from './history'
 import { maskPrivate } from './privacy'
+
+// History reads them too, so they live there.
+export { CHECK_WORDS, jobCheck } from './history'
 
 export const PLUGIN = 'glanceflow'
 
@@ -159,7 +162,7 @@ export function carryTokens(old: GlanceTask[], next: GlanceTask[]): GlanceTask[]
     const same = old.find(before => before.name === one.name && !used.has(before.id))
     if (!same) return one
     used.add(same.id)
-    return { ...one, tokens: same.tokens, cachedTokens: same.cachedTokens, summary: same.summary, files: same.files }
+    return { ...one, tokens: same.tokens, cachedTokens: same.cachedTokens, summary: same.summary, files: same.files, check: same.check }
   })
   const leftover = old.filter(before => !used.has(before.id))
   const [first, ...rest] = carried
@@ -416,6 +419,49 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
   }
   return null
 }
+
+// A piece that starts with a test, build, type check or lint command, after any VAR=x assignments. Stricter than
+// activityOf's words: git commit -m "fix test", cat tests/x.ts and npm install jest run no check.
+// shortcut: reads the command as text; a check run through a script, an alias or a wrapper like sh -c is not seen,
+// add its spelling here when one shows up.
+const CHECK_COMMAND = new RegExp(
+  '^\\s*(?:\\w+=\\S*\\s+)*(?:' +
+    [
+      '(?:npm|pnpm|yarn|bun)\\s+(?:run\\s+)?(?:test|build|check|typecheck|type-check|lint|verify)',
+      '(?:npx|bunx|pnpm\\s+exec|pnpm\\s+dlx)\\s+(?:jest|vitest|mocha|playwright\\s+test|tsc|eslint)',
+      '(?:jest|vitest|mocha|pytest|rspec|phpunit|tsc)',
+      'python3?\\s+-m\\s+(?:pytest|unittest|mypy)',
+      'go\\s+(?:test|build|vet)',
+      'cargo\\s+(?:test|build|check|clippy)',
+      'make\\s+(?:test|check|build)',
+      '(?:\\.\\/gradlew|gradle)\\s+(?:test|build|check)',
+      'mvn\\s+(?:test|verify|package)',
+      '(?:dotnet|swift)\\s+(?:test|build)',
+      'deno\\s+(?:test|check)',
+      'bundle\\s+exec\\s+rspec',
+      'claude\\s+plugin\\s+(?:test|validate)',
+    ].join('|') +
+    ')(?![\\w-])',
+)
+
+/** Whether a shell command runs the project's tests, build, type check or lint: the outside judge for a step's code. */
+export const runsCheck = (command: string) => commandPieces(command).some(piece => CHECK_COMMAND.test(piece))
+
+// Failure counts, a FAIL line, TypeScript errors or a failed build in the output. `npm test 2>&1 | tail` and `|| true`
+// report the last command's exit code, not the tests', so the output is read too.
+// shortcut: heuristic text matching; a runner that prints failures another way passes, add its wording when seen.
+const CHECK_FAILED = /\b[1-9]\d*\s+(?:fail|failed|failing|failures?|errors?)\b|^\s*FAIL\b|\berror TS\d+|\bBUILD FAILED\b/im
+
+/** What a check command's run says about the code: failed when it errored or its output reports failures. */
+export const checkResult = (isError: boolean, output: string): GlanceCheck =>
+  isError || CHECK_FAILED.test(output) ? 'failed' : 'passed'
+
+/** Whether writing a file changes code a check should cover; prose does not. */
+export const needsCheck = (path: string) => !/\.(?:md|mdx|txt|rst)$/i.test(path)
+
+/** A check's result on each step that changed code; a step that passed keeps it when a later check fails. */
+export const applyCheck = (tasks: GlanceTask[], result: GlanceCheck): GlanceTask[] =>
+  tasks.map(one => (one.check === undefined || (one.check === 'passed' && result === 'failed') ? one : { ...one, check: result }))
 
 /** A job's cost in plain dollars: "$0.42", or "<$0.01" for less than a cent. */
 export function formatCost(usd: number): string {

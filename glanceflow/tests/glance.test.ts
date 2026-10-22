@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -3728,6 +3728,82 @@ test('a finished job keeps the size and time of its steps, so the next job learn
   expect(saved[0]?.doneMs).toBe(5 * 60_000)
 })
 
+test("a new job starts without reading History: the project's pace is learned once and again only after a job that changes it", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const store = new Map<string, unknown>([['history:2026-10-05', [pastJob('a', '/work/landing-site', 4, 240_000), pastJob('b', '/work/landing-site', 4, 240_000)]]])
+  let historyReads = 0
+  on('store.get', (_, e) => {
+    if (e.key.startsWith('history:')) historyReads += 1
+    return { value: store.get(e.key) } as never
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined } as never
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  on('session.cwd', () => ({ value: '/work/landing-site' }) as never)
+  on('session.id', () => ({ value: 'chat-1' }) as never)
+  on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: {} } as never }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('tool.call', () => ({ result: {} as never }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  // A planned job that finishes with timed steps, a quick answer with no plan, or a planned job left open.
+  const job = async (turnId: string, kind: 'finished' | 'quick' | 'open') => {
+    await $.turn.start({ text: `Build my landing page ${turnId}`, turnId })
+    let shown = ''
+    if (kind !== 'quick') {
+      await callTool($, { tool: PLAN, steps: ['Read notes', 'Write copy', 'Add form', 'Polish it'], sizes: ['S', 'M', 'M', 'L'] })
+      shown = (await texts($, 'terminal')).join('\n')
+    }
+    if (kind === 'finished') {
+      for (const task of ['Read notes', 'Write copy', 'Add form', 'Polish it']) {
+        await clock.advance(60_000)
+        await callTool($, { tool: PROGRESS, task, percent: 100 })
+      }
+    }
+    await $.turn.complete({ turnId } as never)
+    return shown
+  }
+
+  // The first job shows at once and gets the pace as soon as History is read: 8 units at 1 minute a unit.
+  expect(await job('t1', 'finished')).toContain('about 8m left')
+  expect(historyReads).toBeGreaterThan(0)
+  // t1 finished with timed steps, so t2 learns the pace again. t2, a quick answer, doesn't change it, so t3 reads
+  // only its own day, to record itself.
+  historyReads = 0
+  await job('t2', 'quick')
+  expect(historyReads).toBeGreaterThan(1)
+  historyReads = 0
+  expect(await job('t3', 'open')).toMatch(/about \d+m left/)
+  expect(historyReads).toBe(1)
+})
+
+test('the request Haiku names a job from is masked first', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  let asked = ''
+  on('model.complete', (_, e) => {
+    asked = String((e as { prompt?: string }).prompt ?? '')
+    return { value: { isAnswered: true, text: 'Email the invoice', usage: {} } } as never
+  })
+  await $.turn.start({ text: `Email jane@example.com the invoice, the password is ${SAMPLE_PASSWORD}`, turnId: 't1' })
+  // The job is named in the background.
+  await clock.advance(1)
+  expect(asked).toContain('the invoice')
+  expect(asked).not.toContain('jane@example.com')
+  expect(asked).not.toContain(SAMPLE_PASSWORD)
+})
+
 test("a finished step's summary shows under it until Claude moves on, and code stays out of it", async ($, on) => {
   world(on)
   await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
@@ -3981,6 +4057,38 @@ test('with Approve the plan first on, Claude waits for Start before it works', a
   expect(shown).toContain('Write the page')
 })
 
+test('Aim higher asks Claude for a deeper plan, and the new plan still waits for Start', async ($, on) => {
+  world(on)
+  let sent = ''
+  on('prompt.submit', (_, e) => {
+    sent = e.text
+    return { text: e.text }
+  })
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('✦ Aim higher')
+  // Start stays the main button, and last.
+  const buttons = (await texts($, 'desktop')).filter(one => one === 'Aim higher' || one === 'Start')
+  expect(buttons).toEqual(['Aim higher', 'Start'])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'aim' })
+  await ui.unmount()
+  expect(sent).toStartWith('Aim higher: I want a deeper version of this job, not a bigger one.')
+  expect(sent).toContain('done_when')
+
+  // The same job goes on; Claude's new plan waits for Start again.
+  await $.turn.start({ text: sent, turnId: 't2' })
+  const replanned = await callTool($, { tool: PLAN, steps: ['Read the raw analytics', 'Write the page', 'Test it on a phone'] })
+  expect(String(replanned.result)).toContain('wait for their reply')
+  expect((await callTool($, { tool: 'Bash', command: 'ls' })).deny).toContain('not approved')
+  expect((await texts($, 'terminal')).join('\n')).toContain('▶ Start')
+  // Same job: the plan grew rather than started over.
+  expect(await planPaneTexts($)).toContain('plan grew 2 → 3')
+})
+
 test('with Approve the plan first on, a plan Claude makes with its own task list also waits for Start', async ($, on) => {
   world(on)
   await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
@@ -4034,6 +4142,137 @@ test('each step shows the files Claude added or changed, in the Plan and in Hist
   ).toBe('Changed app/page.tsx, pricing/page.tsx, a.css, b.css and 1 more')
   expect(filesNote([{ path: 'notes.md', isNew: true }])).toBe('Added notes.md')
   expect(filesNote([])).toBe('')
+})
+
+test('a check command is a test, build or type check that runs, not one that is only mentioned', () => {
+  for (const command of ['npm test', 'cd x && pnpm run build', 'CI=1 npx vitest run', 'go test ./...', 'npm test 2>&1 | tail -5', 'claude plugin test glanceflow'])
+    expect(runsCheck(command)).toBe(true)
+  for (const command of ['git commit -m "fix test"', 'cat tests/a.ts', 'npm install jest', 'echo npm test', 'ls'])
+    expect(runsCheck(command)).toBe(false)
+
+  expect(checkResult(true, '')).toBe('failed')
+  // Piped through tail, the exit code is tail's: the output tells.
+  expect(checkResult(false, 'Tests: 3 failed, 12 passed')).toBe('failed')
+  expect(checkResult(false, 'src/a.ts(3,1): error TS2304: Cannot find name')).toBe('failed')
+  expect(checkResult(false, ' 203 pass\n 0 fail')).toBe('passed')
+  expect(needsCheck('README.md')).toBe(false)
+  expect(needsCheck('src/a.ts')).toBe(true)
+
+  const step = (check?: 'passed' | 'failed' | 'unchecked') => ({ ...carryTokens([], [])[0], id: String(check), check }) as never
+  const checked = applyCheck([step(), step('passed'), step('unchecked')], 'failed')
+  expect(checked.map(one => one.check)).toEqual([undefined, 'passed', 'failed'])
+  expect(jobCheck(checked)).toBe('failed')
+  expect(jobCheck([step(), step('passed')])).toBe('passed')
+  expect(jobCheck([step()])).toBeNull()
+})
+
+test('a finished job says whether the code it changed was tested, by the tests run, not by Claude', async ($, on) => {
+  // What the shell answers; every other tool succeeds.
+  let answer: unknown = { result: {}, text: ' 203 pass\n 0 fail' }
+  world(on, ((_: unknown, e: { tool: string }) => (e.tool === 'Bash' ? answer : { result: {} })) as never)
+  let turn = 0
+  const job = async (work: () => Promise<unknown>) => {
+    turn += 1
+    await $.turn.start({ text: `Fix the sign-up bug ${turn}`, turnId: `t${turn}` })
+    await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+    await work()
+    await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+    await callTool($, { tool: PROGRESS, task: 'Check it', percent: 100 })
+    await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: `t${turn}`, reason: 'answer' })
+    return (await texts($, 'terminal')).find(line => line.startsWith('✓ All done')) ?? ''
+  }
+  const edit = (path: string) => callTool($, { tool: 'Edit', file_path: path, old_string: 'a', new_string: 'b' })
+  const bash = (command: string) => callTool($, { tool: 'Bash', command })
+
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toMatch(/ · tested · took /)
+  expect((await texts($, 'desktop')).join('\n')).toMatch(/Fix the sign-up bug 1 · tested · took /)
+  // An edit after the tests passed is untested again.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test'), await edit('/work/src/a.ts')))).toContain(' · not tested · ')
+  // A command that only mentions tests checks nothing.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('git commit -m "fix test"')))).toContain(' · not tested · ')
+  answer = { isError: true, result: 'x', text: '1 failed' }
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toContain(' · tests failed · ')
+  // Prose needs no test.
+  answer = { result: {}, text: '' }
+  const prose = await job(() => edit('/work/README.md'))
+  expect(prose).toContain('✓ All done')
+  expect(prose).not.toMatch(/tested|tests failed/)
+  // The person saying no at the permission dialog says nothing about the code; the Plan shows each step's check.
+  answer = { isError: true, result: 'x', text: "The user doesn't want to proceed with this tool use." }
+  await $.turn.start({ text: 'Fix the login bug', turnId: 'tn' })
+  await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+  await edit('/work/src/a.ts')
+  await bash('npm test')
+  await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+  expect(await planPaneTexts($)).toContain(' took 0s · not tested')
+})
+
+test('a plan says what done looks like, in the Plan and in the Team report, beside whether it was tested', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  const doneWhen = 'The sign-up tests pass and the form works on a phone'
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'], done_when: doneWhen })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+  // A new plan that leaves it out keeps it.
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests', 'Try it on a phone'] })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests', 'Try it on a phone']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/• Fix the sign-up form \(.*\) · tested\n  Done when: The sign-up tests pass and the form works on a phone\n/)
+})
+
+test('/glanceflow goal sets a standing goal for the project: Claude plans toward it, and the Plan and Team report show it', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const goalSection = async () => {
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    return (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:goal')?.text
+  }
+  const goal = (args: string) => $.command.run({ command: 'glanceflow', args } as never).then(one => String(one.text))
+
+  expect(await goal('goal')).toContain('No goal for this project yet')
+  expect(await goalSection()).toBeUndefined()
+  // The goal keeps the person's own capitals.
+  expect(await goal('goal Keep sign-ups working on every phone')).toContain('Keep sign-ups working on every phone')
+  expect(await goal('goal')).toContain('The goal for this project: Keep sign-ups working on every phone')
+  expect(await goalSection()).toContain("# The person's standing goal for this project\nKeep sign-ups working on every phone\nPlan each job toward it")
+
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'] })
+  expect(await planPaneTexts($)).toContain('Goal: Keep sign-ups working on every phone')
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/^Daily update · landing-site · .*\nGoal: Keep sign-ups working on every phone · 1 task, 1 finished, 1 tested\n\nDone\n/)
+
+  expect(await goal('goal off')).toContain('cleared')
+  expect(await goalSection()).toBeUndefined()
 })
 
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */

@@ -37,6 +37,7 @@ import {
 import { findSecrets, maskPrivate } from './privacy'
 import {
   MAX_DETAIL,
+  CHECK_WORDS,
   MAX_NAME,
   PLUGIN,
   QUESTION,
@@ -45,10 +46,12 @@ import {
   activityOf,
   activityTarget,
   apiErrorSentence,
+  applyCheck,
   applyProgress,
   askedMergeSha,
   asksQuestion,
   carryTokens,
+  checkResult,
   cleanName,
   currentStepId,
   durationWords,
@@ -64,10 +67,12 @@ import {
   isLatinText,
   isMcpMergeAction,
   isStartWords,
+  jobCheck,
   jobCost,
   leftLabel,
   liftButtons,
   localTimes,
+  needsCheck,
   needsText,
   noticeBody,
   otherChats,
@@ -80,6 +85,7 @@ import {
   reconcileBackground,
   reportOf,
   resetTime,
+  runsCheck,
   sentenceCase,
   sizeOf,
   stampTimes,
@@ -158,6 +164,9 @@ const TIDY_AT_DEFAULT = 50
 const TIDY_CHOICES = [0, 40, 50, 60, 75] as const
 const TIDY_KEY = 'glanceTidyAt'
 const CHECKPOINT_KEY = 'lastCheckpoint'
+// The person's standing goal for a project (/glanceflow goal), under this prefix and the project's folder.
+const GOAL_PREFIX = 'goal:'
+const MAX_GOAL = 80
 // Up to 0.24 every chat's checklist sat under this one key; now each has its own (RESUME_PREFIX).
 const OLD_RESUME_KEY = 'glanceResume'
 // The recent chats whose checklists are kept, so a resumed chat picks up where it was.
@@ -211,6 +220,13 @@ const HANDOFF_CONFIRM_MS = 8000
 const CONTINUE_TEXT = 'Please continue where you left off.'
 // What the Start button sends when the person approves the plan.
 const START_TEXT = 'The plan looks good. Please start.'
+// What Aim higher sends while a plan waits: a deeper job, not a bigger one, from Felix Rieseberg's depth prompt.
+// Not start words, so the job stays and the new plan waits for Start again.
+const AIM_TEXT =
+  'Aim higher: I want a deeper version of this job, not a bigger one. Before you change the plan, say briefly ' +
+  '(1) what a top professional in this field would do here that I didn\'t ask for; (2) the rawest material they would ' +
+  'start from instead of what has already been digested; (3) the methods and tools they would use; (4) what, other ' +
+  'than you or me, would show the result is right. Then lay out the new plan with plan_steps, with done_when naming that check.'
 const HANDOFF_PROMPT = `Write a handoff note so a brand-new chat can carry on this work without this conversation.
 Cover, briefly: the goal; what is already done; what is left, in order; decisions made and why; the files, commands
 or links that matter; and the very next step. Under 300 words, no preamble.
@@ -251,13 +267,16 @@ The person follows your work on a checklist above the prompt, in plain English.
 - Give each step a size in plan_steps' sizes list, in the same order: S (a few minutes), M, or L (the biggest pieces of work).
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
 - Write every step name in plain English a non-technical person understands, under 40 characters, starting with a verb, like "Build the pricing section".
-- Never put file paths, file names, commands, code or tool names in a step name.`
+- Never put file paths, file names, commands, code or tool names in a step name.
+- Fill in plan_steps' done_when: what will be true when the job is done, and what other than you will show it. Make the last step that check. When the job changes code, run the project's tests, build or type check rather than saying it passed. The checklist shows whether changed code was tested.`
 
 const SPINNER = ['◐', '◓', '◑', '◒']
 const HELPERS_PER_STEP = 3
 
 // The tools that write files, and the field each names the file in.
 const FILE_TOOLS: Record<string, 'file_path' | 'notebook_path'> = { Write: 'file_path', Edit: 'file_path', MultiEdit: 'file_path', NotebookEdit: 'notebook_path' }
+// What a tool call's error says when the person said no at the permission dialog.
+const REJECTED = /doesn't want to proceed|user (has )?(rejected|denied|declined)/i
 
 type $ = EngineInterface
 
@@ -329,7 +348,8 @@ const syncTicker = ($: $, list: GlanceChecklist | null) => {
     tickerEvery = every
     ticker = $.clock.every(every, () => {
       void update($, tickAtom, tick => (tick ?? 0) + 1)
-      void checkStall($)
+      // A tick runs 4 times a second: a failure here must not repeat as an unhandled error.
+      void checkStall($).catch(() => undefined)
     })
   }
 }
@@ -579,10 +599,33 @@ const readHistory = async ($: $, days?: readonly string[]): Promise<GlanceHistor
   return mergedEntries(stored)
 }
 
+// This project's pace, kept between jobs: reading every chat's 30 days of history held up each new job, about 20 ms
+// for every 1,000 saved jobs. A job this chat records clears it.
+// shortcut: jobs other chats finish count from this chat's next session; refresh it on a timer if that matters.
+let pace: { project: string; ms: number | null } | undefined
+
 /** This project's pace from the History of the last 30 days; null when it isn't known yet. */
 const learnPace = async ($: $): Promise<number | null> => {
   try {
-    return paceFromHistory(await readHistory($), await $.session.cwd())
+    const project = await $.session.cwd()
+    if (pace?.project !== project) pace = { project, ms: paceFromHistory(await readHistory($), project) }
+    return pace.ms
+  } catch {
+    return null
+  }
+}
+
+/** The pace already learned for this project, at once; undefined until it is. */
+const knownPace = async ($: $): Promise<number | null | undefined> => {
+  const project = await $.session.cwd().catch(() => null)
+  return pace !== undefined && pace.project === project ? pace.ms : undefined
+}
+
+/** The person's standing goal for this project; null when none is set or the store can't be read. */
+const readGoal = async ($: $): Promise<string | null> => {
+  try {
+    const goal = await $.store.get(`${GOAL_PREFIX}${await $.session.cwd()}`)
+    return typeof goal === 'string' && goal ? goal : null
   } catch {
     return null
   }
@@ -590,6 +633,7 @@ const learnPace = async ($: $): Promise<number | null> => {
 
 const startJob = async ($: $, text: string, jobId: string) => {
   const previous = await read($, checklistAtom)
+  const known = await knownPace($)
   const list: GlanceChecklist = {
     // Until Haiku names it in English, a request in another language shows a neutral title.
     title: isLatinText(text.split('\n')[0] ?? '') ? cleanName(text.split('\n')[0]) : 'Working on your request',
@@ -610,7 +654,9 @@ const startJob = async ($: $, text: string, jobId: string) => {
     activity: null,
     approval: 'none',
     costAtStart: (await read($, usageAtom)).costUsd,
-    paceMs: await learnPace($),
+    paceMs: known ?? null,
+    doneWhen: null,
+    goal: await readGoal($),
     // Work still running from the last job stays in view.
     helpers: (previous?.helpers ?? []).filter(one => one.status === 'running'),
   }
@@ -619,6 +665,12 @@ const startJob = async ($: $, text: string, jobId: string) => {
   await update($, checklistAtom, () => list)
   syncTicker($, list)
   saveSoon($)
+  // Not learned yet: the checklist shows now, and gets the pace once History is read.
+  if (known === undefined) {
+    void learnPace($)
+      .then(ms => (ms === null ? null : change($, one => (one.jobId === jobId && one.paceMs === null ? { ...one, paceMs: ms } : one))))
+      .catch(() => undefined)
+  }
   // Name the job in the background; a newer job wins.
   $.clock.after(0, () => void nameJob($, text, jobId))
 }
@@ -634,7 +686,8 @@ const nameJob = async ($: $, text: string, jobId: string) => {
         'like "Build my landing page", in sentence case: only the first word and names get a capital. ' +
         'Always in English, even when the request is in another language. ' +
         'No file names, code, quotes or punctuation. ' +
-        `Reply with the name only.\n\nRequest:\n${text.slice(0, 2000)}`,
+        // Masked like everything GlanceFlow shows: keys and personal details stay out of the naming request.
+        `Reply with the name only.\n\nRequest:\n${maskPrivate(text).slice(0, 2000)}`,
     })
     if (!answer.isAnswered) {
       return
@@ -659,18 +712,29 @@ const setNeedsYou = ($: $, reason: string) =>
     list.phase === 'done' || list.phase === 'stopped' ? list : { ...list, phase: 'needsYou', needsYouReason: reason, question: null },
   )
 
-/** Claude wrote or edited a file: the current step keeps it, created or changed, once. */
+/** Claude wrote or edited a file: the current step keeps it, created or changed, once. A code change is untested again. */
 const noteFile = async ($: $, path: string, isNew: boolean) => {
   const file: GlanceFile = { path: projectPath(path, await $.session.cwd().catch(() => '')), isNew }
   await change($, list => {
     const stepId = currentStepId(list)
     return {
       ...list,
-      tasks: list.tasks.map(one =>
-        one.id !== stepId || (one.files ?? []).some(known => known.path === file.path) ? one : { ...one, files: [...(one.files ?? []), file] },
-      ),
+      tasks: list.tasks.map(one => {
+        if (one.id !== stepId) return one
+        const files = (one.files ?? []).some(known => known.path === file.path) ? one.files : [...(one.files ?? []), file]
+        return needsCheck(path) ? { ...one, files, check: 'unchecked' } : { ...one, files }
+      }),
     }
   })
+}
+
+// A test, build or type check Claude ran: its result marks the steps that changed code. A run the person rejected or
+// interrupted says nothing about the code.
+const noteCheck = async ($: $, tool: string, input: { command?: unknown }, ran: { deny?: string; isError?: boolean; text?: unknown }) => {
+  if ((tool !== 'Bash' && tool !== 'PowerShell') || ran.deny || !runsCheck(String(input.command ?? ''))) return
+  const text = String(ran.text ?? '')
+  if (ran.isError && (REJECTED.test(text) || /\binterrupted\b/i.test(text))) return
+  await change($, list => ({ ...list, tasks: applyCheck(list.tasks, checkResult(ran.isError === true, text)) }))
 }
 
 const setStuck = ($: $, reason: string) =>
@@ -820,7 +884,10 @@ const recordJob = async ($: $) => {
     const day = dayKey(list.startedAt)
     // This chat's own key only: the store locks one set at a time, so a shared key could lose another chat's job.
     const key = historyKey(day, await $.session.id())
-    await $.store.set(key, upsertEntry(await $.store.get(key), entryFromChecklist(list, project, jobCost(list, await read($, usageAtom)))))
+    const entry = entryFromChecklist(list, project, jobCost(list, await read($, usageAtom)))
+    await $.store.set(key, upsertEntry(await $.store.get(key), entry))
+    // A finished job with timed steps changes the pace: the next job learns it again, in the background.
+    if (entry.outcome === 'done' && (entry.doneUnits ?? 0) > 0) pace = undefined
     const view = await read($, historyAtom)
     if (view !== null && view.day === day && view.project === project) {
       const entries = await readHistory($, [day])
@@ -1078,6 +1145,7 @@ const holdForApproval = async ($: $): Promise<boolean> => {
 
 /** The person approves the plan: the same job starts. */
 const startPlan = ($: $) => sendAsUser($, START_TEXT, () => $.ui.toast("Couldn't start right now. Type: start"))
+const aimHigher = ($: $) => sendAsUser($, AIM_TEXT, () => $.ui.toast("Couldn't send that right now. Ask Claude for a deeper plan."))
 
 /** Picks Simple, Details or Off directly, as the settings panel does. */
 const setView = async ($: $, view: 'simple' | 'detailed' | 'off') => {
@@ -1264,6 +1332,8 @@ export function registerGlance(on: On): void {
     for (const key of expiredHistoryKeys(await $.store.keys(), await now($))) {
       await $.store.delete(key)
     }
+    // Learned now, so the first job's time left needs no wait.
+    void learnPace($)
     await $.tool.register({
       name: 'plan_steps',
       description:
@@ -1278,6 +1348,12 @@ export function registerGlance(on: On): void {
             type: 'array',
             items: { type: 'string', enum: ['S', 'M', 'L'] },
             description: 'One size per step, in order: S small, M medium, L large.',
+          },
+          done_when: {
+            type: 'string',
+            description:
+              'What will be true when the job is done, and what other than you will show it: tests passing, the page ' +
+              'loading on a phone, the person trying it. One plain-English sentence, no file names or code.',
           },
         },
         required: ['steps'],
@@ -1305,7 +1381,7 @@ export function registerGlance(on: On): void {
     await $.command.register({
       name: 'glanceflow',
       description:
-        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, week, tour, pause, continue, plan, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
+        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
     })
     // A reload drops the module's timers; pick the animation back up.
     syncTicker($, await read($, checklistAtom))
@@ -1456,6 +1532,26 @@ export function registerGlance(on: On): void {
       void startFreshChat($)
       return { text: 'Starting a fresh chat from a handoff note…' }
     }
+    if (arg.startsWith('goal')) {
+      // arg is lowercased: the goal keeps the person's own spelling.
+      const text = e.args.trim().slice('goal'.length).trim()
+      const key = `${GOAL_PREFIX}${await $.session.cwd()}`
+      if (text.toLowerCase() === 'off') {
+        await $.store.delete(key)
+        return { text: 'The goal for this project is cleared.' }
+      }
+      const goal = text ? cleanName(text, MAX_GOAL) : ''
+      if (!goal) {
+        const current = await readGoal($)
+        return {
+          text: current
+            ? `The goal for this project: ${current}. Claude plans each job toward it. Clear it with /glanceflow goal off.`
+            : 'No goal for this project yet. Set one with /glanceflow goal and what you want, like: keep sign-ups working.',
+        }
+      }
+      await $.store.set(key, goal)
+      return { text: `The goal for this project: ${goal}. Claude plans each new job toward it.` }
+    }
     if (arg.startsWith('details')) {
       const choice = arg.slice('details'.length).trim()
       const isDetailed = toggled(choice, (await read($, detailAtom)) === 'detailed')
@@ -1476,11 +1572,22 @@ export function registerGlance(on: On): void {
     }
 
     const checkpoint = await checkpointOf($).catch(() => null)
+    const goal = await readGoal($)
 
     return {
       sections: [
         ...composed.sections,
         { id: `${PLUGIN}:checklist`, text: PROMPT_SECTION, scope: 'session' as const },
+        // The outcome beyond the task, across jobs: each plan aims at it.
+        ...(goal === null
+          ? []
+          : [
+              {
+                id: `${PLUGIN}:goal`,
+                text: `# The person's standing goal for this project\n${goal}\nPlan each job toward it, and say in done_when how this job moves it forward.`,
+                scope: 'session' as const,
+              },
+            ]),
         // Saved before the chat was tidied up: what the work needs to carry on.
         ...(checkpoint === null
           ? []
@@ -1682,8 +1789,9 @@ export function registerGlance(on: On): void {
     const isNewFile = filePath !== '' && tool === 'Write' && !(await $.fs.exists(filePath).catch(() => true))
 
     if (tool === PLAN_TOOL) {
-      const input = e as unknown as { steps?: unknown; sizes?: unknown }
+      const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown }
       const steps = (Array.isArray(input.steps) ? input.steps : []).map(one => cleanName(one)).slice(0, 8)
+      const doneWhen = String(input.done_when ?? '').trim() ? cleanName(input.done_when, MAX_SUMMARY) : null
       const sizes = Array.isArray(input.sizes) ? input.sizes : []
       if (steps.length === 0) {
         return { deny: 'plan_steps needs 2 to 8 step names.' }
@@ -1692,6 +1800,7 @@ export function registerGlance(on: On): void {
       const started = await now($)
       const known = await read($, checklistAtom)
       const paceMs = known === null ? await learnPace($) : known.paceMs
+      const goal = known === null ? await readGoal($) : null
       await update($, checklistAtom, (list): GlanceChecklist => ({
         paceMs: list?.paceMs ?? paceMs,
         planAt: list?.hasPlan ? (list.planAt ?? started) : started,
@@ -1713,6 +1822,9 @@ export function registerGlance(on: On): void {
         hasPlan: true,
         tasks: stampTimes(carryTokens(list?.tasks ?? [], tasks), started),
         helpers: list?.helpers ?? [],
+        // A new plan without it keeps the one said before.
+        doneWhen: doneWhen ?? list?.doneWhen ?? null,
+        goal: list ? (list.goal ?? null) : goal,
       }))
       syncTicker($, await read($, checklistAtom))
       saveSoon($)
@@ -1766,6 +1878,7 @@ export function registerGlance(on: On): void {
       if (isMerging) approvedSha = null
       const ran = await next(e)
       if (isMerging) noteMerge(ran)
+      await noteCheck($, tool, e as unknown as { command?: unknown }, ran)
       if (filePath !== '' && ran.deny === undefined && !ran.isError) {
         await noteFile($, filePath, isNewFile)
       }
@@ -1818,12 +1931,13 @@ export function registerGlance(on: On): void {
       return ran
     }
     // The person said no at the permission dialog.
-    if (ran.isError && /doesn't want to proceed|user (has )?(rejected|denied|declined)/i.test(String(ran.text ?? ''))) {
+    if (ran.isError && REJECTED.test(String(ran.text ?? ''))) {
       failuresInARow = 0
       await setStuck($, DENIED)
 
       return ran
     }
+    await noteCheck($, tool, e as unknown as { command?: unknown }, ran)
     if (ran.isError) {
       failuresInARow += 1
       if (failuresInARow >= 3) {
@@ -2480,7 +2594,7 @@ export function registerGlance(on: On): void {
         // Under the Done heading a time says how long it took; the terminal, with no heading in the column, says so.
         const took = ms === null ? (vector ? '' : 'done') : vector ? (ms < 1000 ? '' : durationWords(ms)) : `took ${formatDuration(ms)}`
         done.push(
-          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', 'Done') }, one.name, {}, [took, tokensOf(one)].filter(Boolean).join(' · ')),
+          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', 'Done') }, one.name, {}, [took, one.check ? CHECK_WORDS[one.check] : '', tokensOf(one)].filter(Boolean).join(' · ')),
           ...(one.summary ? [note(`${key}-summary`, one.summary)] : []),
           ...filesOf(key, one),
           ...helperRows(one),
@@ -2575,6 +2689,16 @@ export function registerGlance(on: On): void {
         <Text dimColor wrap="wrap">
           {when}
         </Text>
+        {list.goal && (
+          <Text key="goal" wrap="wrap">
+            {`Goal: ${list.goal}`}
+          </Text>
+        )}
+        {list.doneWhen && (
+          <Text key="done-when" wrap="wrap">
+            {`Done when: ${list.doneWhen}`}
+          </Text>
+        )}
         {vector ? (
           <Box key="progress" flexDirection="row" alignItems="center" gap={1} marginTop={1}>
             <Box flexShrink={0}>{kit.meter(isDone ? 'ok' : 'active', percent, 0, `${percent}% done`, 160)}</Box>
@@ -2987,6 +3111,7 @@ export function registerGlance(on: On): void {
     const controls = isEnabled
       ? [
           canPause && action('pause', 'pause', pauseLabel, () => pauseJob($)),
+          list0?.approval === 'waiting' && action('aim', 'spark', 'Aim higher', () => aimHigher($)),
           list0?.approval === 'waiting' && action('start', 'play', 'Start', () => startPlan($), undefined, true),
           canContinue && action('continue', 'play', continueLabel, () => continueJob($), undefined, !(vector && isLimitStuck)),
         ].filter(Boolean)
@@ -3373,11 +3498,17 @@ export function registerGlance(on: On): void {
         </Text>
       )
     } else if (list.phase === 'done') {
+      // Whether the code the job changed was tested: outside proof, not Claude's own word.
+      const check = jobCheck(list.tasks)
+      const checkWords = check === null ? '' : CHECK_WORDS[check]
       header = vector ? (
-        headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, `took ${elapsed}`, jobTokenNote])
+        headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, checkWords, `took ${elapsed}`, jobTokenNote])
       ) : (
         <Text wrap="truncate-end" color="green" bold={isCalm}>
-          {fit(`✓ All done · ${list.title} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`, headerWidth).trimEnd()}
+          {fit(
+            `✓ All done · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
+            headerWidth,
+          ).trimEnd()}
         </Text>
       )
     } else {

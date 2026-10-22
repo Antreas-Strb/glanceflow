@@ -1,6 +1,6 @@
 // The day's history of jobs, for a retro: pure functions, no engine calls.
 
-import type { GlanceChecklist, GlanceFile, GlanceHistoryEntry, GlanceOutcome, GlanceTaskSize } from '../types'
+import type { GlanceCheck, GlanceChecklist, GlanceFile, GlanceHistoryEntry, GlanceOutcome, GlanceTask, GlanceTaskSize } from '../types'
 
 export const HISTORY_PREFIX = 'history:'
 export const HISTORY_DAYS = 30
@@ -74,6 +74,14 @@ export function entryFiles(entry: GlanceHistoryEntry): GlanceFile[] {
   return [...(entry.filesAdded ?? []).map(path => ({ path, isNew: true })), ...(entry.filesChanged ?? []).map(path => ({ path, isNew: false }))]
 }
 
+/** The job's check: the worst of its steps' (failed, then unchecked, then passed); null when no step changed code. */
+export function jobCheck(tasks: readonly GlanceTask[]): GlanceCheck | null {
+  const checks = tasks.map(one => one.check)
+  return (['failed', 'unchecked', 'passed'] as const).find(check => checks.includes(check)) ?? null
+}
+
+export const CHECK_WORDS: Record<GlanceCheck, string> = { passed: 'tested', failed: 'tests failed', unchecked: 'not tested' }
+
 /** One job as the history keeps it; `costUsd` is what it cost, where the host keeps a ledger. */
 export function entryFromChecklist(list: GlanceChecklist, project: string, costUsd: number | null = null): GlanceHistoryEntry {
   const files = list.tasks.flatMap(one => one.files ?? [])
@@ -105,6 +113,9 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     costUsd,
     doneUnits: timed.reduce((sum, one) => sum + SIZE_WEIGHT[one.size], 0),
     doneMs: timed.reduce((sum, one) => sum + (one.finishedAt! - one.startedAt!), 0),
+    check: jobCheck(list.tasks),
+    doneWhen: list.doneWhen ?? null,
+    goal: list.goal ?? null,
   }
 }
 
@@ -216,7 +227,14 @@ export function teamReport(
     span === 'week'
       ? `Weekly update · ${projectName(view.project)} · ${shortDay(shiftDay(view.day, -(WEEK_DAYS - 1)))} to ${shortDay(view.day)}`
       : `Daily update · ${projectName(view.project)} · ${longDay(view.day)}`
-  const lines = [heading, '']
+  // Each standing goal the jobs worked toward, and how they did.
+  const goals = [...new Set(jobs.map(one => one.goal).filter(Boolean))].map(goal => {
+    const toward = jobs.filter(one => one.goal === goal)
+    const finished = toward.filter(one => one.outcome === 'done').length
+    const tested = toward.filter(one => one.check === 'passed').length
+    return `Goal: ${goal} · ${toward.length} task${toward.length === 1 ? '' : 's'}, ${finished} finished, ${tested} tested`
+  })
+  const lines = [heading, ...goals, '']
 
   if (jobs.length === 0) {
     return [...lines, `No planned work was recorded ${span === 'week' ? 'this week' : 'on this day'}.`].join('\n')
@@ -229,7 +247,8 @@ export function teamReport(
   if (done.length > 0) {
     lines.push('Done')
     for (const one of done) {
-      lines.push(`• ${one.title}${took(one)}`)
+      lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${CHECK_WORDS[one.check]}` : ''}`)
+      if (one.doneWhen) lines.push(`  Done when: ${one.doneWhen}`)
       const notes = one.doneNotes ?? []
       if (notes.some(Boolean)) {
         // What each step got done, in Claude's words where it gave them.
