@@ -115,6 +115,7 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     doneMs: timed.reduce((sum, one) => sum + (one.finishedAt! - one.startedAt!), 0),
     check: jobCheck(list.tasks),
     doneWhen: list.doneWhen ?? null,
+    goal: list.goal ?? null,
   }
 }
 
@@ -226,7 +227,14 @@ export function teamReport(
     span === 'week'
       ? `Weekly update · ${projectName(view.project)} · ${shortDay(shiftDay(view.day, -(WEEK_DAYS - 1)))} to ${shortDay(view.day)}`
       : `Daily update · ${projectName(view.project)} · ${longDay(view.day)}`
-  const lines = [heading, '']
+  // Each standing goal the jobs worked toward, and how they did.
+  const goals = [...new Set(jobs.map(one => one.goal).filter(Boolean))].map(goal => {
+    const toward = jobs.filter(one => one.goal === goal)
+    const finished = toward.filter(one => one.outcome === 'done').length
+    const tested = toward.filter(one => one.check === 'passed').length
+    return `Goal: ${goal} · ${toward.length} task${toward.length === 1 ? '' : 's'}, ${finished} finished, ${tested} tested`
+  })
+  const lines = [heading, ...goals, '']
 
   if (jobs.length === 0) {
     return [...lines, `No planned work was recorded ${span === 'week' ? 'this week' : 'on this day'}.`].join('\n')

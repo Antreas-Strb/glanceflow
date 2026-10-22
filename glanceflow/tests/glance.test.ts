@@ -4109,6 +4109,7 @@ test('a finished job says whether the code it changed was tested, by the tests r
   const bash = (command: string) => callTool($, { tool: 'Bash', command })
 
   expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toMatch(/ · tested · took /)
+  expect((await texts($, 'desktop')).join('\n')).toMatch(/Fix the sign-up bug 1 · tested · took /)
   // An edit after the tests passed is untested again.
   expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test'), await edit('/work/src/a.ts')))).toContain(' · not tested · ')
   // A command that only mentions tests checks nothing.
@@ -4156,6 +4157,46 @@ test('a plan says what done looks like, in the Plan and in the Team report, besi
   await ui.press({ key: 'report' })
   await ui.unmount()
   expect(copied).toMatch(/• Fix the sign-up form \(.*\) · tested\n  Done when: The sign-up tests pass and the form works on a phone\n/)
+})
+
+test('/glanceflow goal sets a standing goal for the project: Claude plans toward it, and the Plan and Team report show it', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const goalSection = async () => {
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    return (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:goal')?.text
+  }
+  const goal = (args: string) => $.command.run({ command: 'glanceflow', args } as never).then(one => String(one.text))
+
+  expect(await goal('goal')).toContain('No goal for this project yet')
+  expect(await goalSection()).toBeUndefined()
+  // The goal keeps the person's own capitals.
+  expect(await goal('goal Keep sign-ups working on every phone')).toContain('Keep sign-ups working on every phone')
+  expect(await goal('goal')).toContain('The goal for this project: Keep sign-ups working on every phone')
+  expect(await goalSection()).toContain("# The person's standing goal for this project\nKeep sign-ups working on every phone\nPlan each job toward it")
+
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'] })
+  expect(await planPaneTexts($)).toContain('Goal: Keep sign-ups working on every phone')
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/^Daily update · landing-site · .*\nGoal: Keep sign-ups working on every phone · 1 task, 1 finished, 1 tested\n\nDone\n/)
+
+  expect(await goal('goal off')).toContain('cleared')
+  expect(await goalSection()).toBeUndefined()
 })
 
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */

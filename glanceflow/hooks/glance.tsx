@@ -164,6 +164,9 @@ const TIDY_AT_DEFAULT = 50
 const TIDY_CHOICES = [0, 40, 50, 60, 75] as const
 const TIDY_KEY = 'glanceTidyAt'
 const CHECKPOINT_KEY = 'lastCheckpoint'
+// The person's standing goal for a project (/glanceflow goal), under this prefix and the project's folder.
+const GOAL_PREFIX = 'goal:'
+const MAX_GOAL = 80
 // Up to 0.24 every chat's checklist sat under this one key; now each has its own (RESUME_PREFIX).
 const OLD_RESUME_KEY = 'glanceResume'
 // The recent chats whose checklists are kept, so a resumed chat picks up where it was.
@@ -604,6 +607,16 @@ const learnPace = async ($: $): Promise<number | null> => {
   }
 }
 
+/** The person's standing goal for this project; null when none is set or the store can't be read. */
+const readGoal = async ($: $): Promise<string | null> => {
+  try {
+    const goal = await $.store.get(`${GOAL_PREFIX}${await $.session.cwd()}`)
+    return typeof goal === 'string' && goal ? goal : null
+  } catch {
+    return null
+  }
+}
+
 const startJob = async ($: $, text: string, jobId: string) => {
   const previous = await read($, checklistAtom)
   const list: GlanceChecklist = {
@@ -628,6 +641,7 @@ const startJob = async ($: $, text: string, jobId: string) => {
     costAtStart: (await read($, usageAtom)).costUsd,
     paceMs: await learnPace($),
     doneWhen: null,
+    goal: await readGoal($),
     // Work still running from the last job stays in view.
     helpers: (previous?.helpers ?? []).filter(one => one.status === 'running'),
   }
@@ -1340,7 +1354,7 @@ export function registerGlance(on: On): void {
     await $.command.register({
       name: 'glanceflow',
       description:
-        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, week, tour, pause, continue, plan, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
+        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
     })
     // A reload drops the module's timers; pick the animation back up.
     syncTicker($, await read($, checklistAtom))
@@ -1491,6 +1505,26 @@ export function registerGlance(on: On): void {
       void startFreshChat($)
       return { text: 'Starting a fresh chat from a handoff note…' }
     }
+    if (arg.startsWith('goal')) {
+      // arg is lowercased: the goal keeps the person's own spelling.
+      const text = e.args.trim().slice('goal'.length).trim()
+      const key = `${GOAL_PREFIX}${await $.session.cwd()}`
+      if (text.toLowerCase() === 'off') {
+        await $.store.delete(key)
+        return { text: 'The goal for this project is cleared.' }
+      }
+      const goal = text ? cleanName(text, MAX_GOAL) : ''
+      if (!goal) {
+        const current = await readGoal($)
+        return {
+          text: current
+            ? `The goal for this project: ${current}. Claude plans each job toward it. Clear it with /glanceflow goal off.`
+            : 'No goal for this project yet. Set one with /glanceflow goal and what you want, like: keep sign-ups working.',
+        }
+      }
+      await $.store.set(key, goal)
+      return { text: `The goal for this project: ${goal}. Claude plans each new job toward it.` }
+    }
     if (arg.startsWith('details')) {
       const choice = arg.slice('details'.length).trim()
       const isDetailed = toggled(choice, (await read($, detailAtom)) === 'detailed')
@@ -1511,11 +1545,22 @@ export function registerGlance(on: On): void {
     }
 
     const checkpoint = await checkpointOf($).catch(() => null)
+    const goal = await readGoal($)
 
     return {
       sections: [
         ...composed.sections,
         { id: `${PLUGIN}:checklist`, text: PROMPT_SECTION, scope: 'session' as const },
+        // The outcome beyond the task, across jobs: each plan aims at it.
+        ...(goal === null
+          ? []
+          : [
+              {
+                id: `${PLUGIN}:goal`,
+                text: `# The person's standing goal for this project\n${goal}\nPlan each job toward it, and say in done_when how this job moves it forward.`,
+                scope: 'session' as const,
+              },
+            ]),
         // Saved before the chat was tidied up: what the work needs to carry on.
         ...(checkpoint === null
           ? []
@@ -1728,6 +1773,7 @@ export function registerGlance(on: On): void {
       const started = await now($)
       const known = await read($, checklistAtom)
       const paceMs = known === null ? await learnPace($) : known.paceMs
+      const goal = known === null ? await readGoal($) : null
       await update($, checklistAtom, (list): GlanceChecklist => ({
         paceMs: list?.paceMs ?? paceMs,
         planAt: list?.hasPlan ? (list.planAt ?? started) : started,
@@ -1751,6 +1797,7 @@ export function registerGlance(on: On): void {
         helpers: list?.helpers ?? [],
         // A new plan without it keeps the one said before.
         doneWhen: doneWhen ?? list?.doneWhen ?? null,
+        goal: list ? (list.goal ?? null) : goal,
       }))
       syncTicker($, await read($, checklistAtom))
       saveSoon($)
@@ -2615,6 +2662,11 @@ export function registerGlance(on: On): void {
         <Text dimColor wrap="wrap">
           {when}
         </Text>
+        {list.goal && (
+          <Text key="goal" wrap="wrap">
+            {`Goal: ${list.goal}`}
+          </Text>
+        )}
         {list.doneWhen && (
           <Text key="done-when" wrap="wrap">
             {`Done when: ${list.doneWhen}`}
