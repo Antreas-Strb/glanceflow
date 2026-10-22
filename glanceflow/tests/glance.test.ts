@@ -4988,3 +4988,59 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
 })
+
+test('in the Plan, a helper opens in the main view, and one working in the background stops alone', async ($, on) => {
+  const stopped: string[] = []
+  world(on, ((_: unknown, e: { tool?: string; task_id?: unknown }) => {
+    if (e.tool === 'TaskStop') stopped.push(String(e.task_id))
+    return { result: {} }
+  }) as never)
+  on('classic.Stop', () => ({}) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const viewed: unknown[] = []
+  on('ui.view', (_, e) => {
+    viewed.push(e)
+    return { value: {} } as never
+  })
+  let next = 'a1'
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: next }) as never)
+  const spawn = (description: string, background: boolean) =>
+    $.agent.spawn({
+      tool_use_id: `tu-${description}`,
+      prompt: description,
+      description,
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background,
+      fork: false,
+    } as never)
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Look around the project', 'Write the page'] })
+  await spawn('Find the pricing data', false)
+  next = 'a2'
+  await spawn('Check the old page', true)
+  await $.turn.complete({ answer: 'Working on it.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'Run the dev server' }] } as never)
+
+  for (const surface of SURFACES) {
+    const plan = await $.ui.mount({ ...PLAN_PANE, surface })
+    const buttons = (await plan.findAll({ type: 'Button' })).map(one => String(one.props.key))
+    // A helper in the foreground opens; Esc stops it with Claude. One in the background also stops; a shell task only stops.
+    expect(buttons).toContain('open-a1')
+    expect(buttons).not.toContain('stop-a1')
+    expect(buttons).toContain('open-a2')
+    expect(buttons).toContain('stop-a2')
+    expect(buttons).not.toContain('open-bg:b1')
+    expect(buttons).toContain('stop-bg:b1')
+    if (surface === 'terminal') {
+      await plan.press({ key: 'open-a1' })
+      await plan.press({ key: 'stop-a2' })
+      await plan.press({ key: 'stop-bg:b1' })
+    }
+    await plan.unmount()
+  }
+  expect(viewed).toEqual([{ agentId: 'a1' }])
+  expect(stopped).toEqual(['a2', 'b1'])
+})
