@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
@@ -4987,4 +4987,269 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved before 0.25')
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
+})
+
+test('in VS Code, which draws no band above the prompt, the checklist opens in a pane', async ($, on) => {
+  world(on)
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push((e as { id: string }).id)
+    return { value: { isPlaced: true } } as never
+  })
+  on('session.attach', (_, e) => ({ clientId: e.clientId }) as never)
+
+  await $.session.attach({ surface: 'vscode', clientId: 'vscode:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+  // A terminal or the desktop app has the band: no pane there.
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const ui = await $.ui.mount({
+    plugin: 'glanceflow',
+    component: 'Pane',
+    requestId: 'glanceflow-checklist',
+    surface: 'vscode',
+    props: { title: 'GlanceFlow', isFocused: false, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 12 }, view: {} },
+  })
+  const shown = (await ui.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  const buttons = (await ui.findAll({ type: 'Button' })).map(one => one.text).join('\n')
+  await ui.unmount()
+  expect(shown).toContain('Write the page')
+  expect(shown).toContain('Check it')
+  expect(buttons).toContain('Settings')
+
+  // Closed by the person, it comes back with /glanceflow show.
+  const reply = await $.command.run({ command: 'glanceflow', args: 'show' } as never)
+  expect(opened).toEqual(['glanceflow-checklist', 'glanceflow-checklist'])
+  expect(JSON.stringify(reply)).toContain('checklist is open')
+})
+
+test("notices go through Claude Code first, so the person's Notification hooks reach them away from the computer", async ($, on) => {
+  const { clock } = soundWorld(on)
+  on('classic.StopFailure', () => ({}) as never)
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    ran.push((e as { argv: readonly string[] }).argv[0] ?? '')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  const notified: { text: string; title?: string }[] = []
+  let answer: unknown = { isSent: true, channel: 'iterm2' }
+  on('ui.notify', (_, e) => {
+    notified.push({ text: e.text, title: e.title })
+    return { value: answer } as never
+  })
+  await $.command.run({ command: 'glanceflow', args: 'notify on' } as never)
+  await clock.advance(1)
+  notified.length = 0
+  ran.length = 0
+
+  // Claude Code's channel showed it (and the hooks ran): no second notice from the computer.
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write it', 'Check it'] })
+  await $.classic.StopFailure({ error: 'overloaded_error', error_details: '' } as never)
+  await clock.advance(1)
+  expect(notified.map(one => one.title)).toEqual(['Claude is stuck'])
+  expect(notified[0]?.text).toBeTruthy()
+  expect(ran.filter(one => one === 'osascript' || one === 'notify-send')).toEqual([])
+
+  // No text where the person looks (the Desktop app, a bare bell): the computer's own notice shows it too.
+  for (const reply of [{ isSent: false, reason: 'no-surface' }, { isSent: true, channel: 'terminal_bell' }]) {
+    answer = reply
+    notified.length = 0
+    ran.length = 0
+    await $.turn.start({ text: 'Try again', turnId: `t-${notified.length}-${String(reply.isSent)}` })
+    await callTool($, { tool: PLAN, steps: ['Write it'] })
+    await $.classic.Notification({ message: 'Claude needs your permission', notification_type: 'permission_prompt' } as never)
+    await clock.advance(1)
+    expect(notified.map(one => one.title)).toEqual(['Claude needs you'])
+    expect(ran).toContain('osascript')
+  }
+
+  // Claude Code hears a mod's notice again as a plugin_notification: that is not Claude needing the person.
+  notified.length = 0
+  await $.turn.start({ text: 'One more', turnId: 't9' })
+  await callTool($, { tool: PLAN, steps: ['Write it'] })
+  await $.classic.Notification({ message: 'Claude is stuck', notification_type: 'plugin_notification' } as never)
+  await clock.advance(1)
+  expect(notified).toEqual([])
+})
+
+test("in plan mode the plan the person approves in Claude Code is the checklist, with no plan of the planning and no second approval", async ($, on) => {
+  world(on)
+  on('classic.UserPromptSubmit', () => ({}) as never)
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'Add a subtract function', permission_mode: 'plan' } as never)
+  await $.turn.start({ text: 'Add a subtract function', turnId: 't1' })
+
+  // Claude looks around and writes the plan, with no checklist of the planning itself.
+  const looked = await callTool($, { tool: 'Read', file_path: '/work/calc.py' })
+  expect(looked.deny).toBeUndefined()
+  const meta = await callTool($, { tool: PLAN, steps: ['Look at the code', 'Write the plan'] })
+  expect(meta.deny).toContain('Plan mode')
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('Look at the code')
+
+  // The person approves the plan in Claude Code: its steps become the checklist, and the work starts at once.
+  const handed = await callTool($, { tool: 'ExitPlanMode' })
+  expect(handed.deny).toBeUndefined()
+  const planned = await callTool($, { tool: PLAN, steps: ['Add the subtract function', 'Test both functions'] })
+  expect(String(planned.result)).not.toContain('wait for their reply')
+  const ran = await callTool($, { tool: 'Edit', file_path: '/work/calc.py', old_string: 'a', new_string: 'b' })
+  expect(ran.deny).toBeUndefined()
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('Add the subtract function')
+  expect(shown).not.toContain('▶ Start')
+
+  // The next prompt, out of plan mode, plans and waits for Start as before.
+  await $.classic.UserPromptSubmit({ prompt: 'Now a multiply function', permission_mode: 'default' } as never)
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Now a multiply function', turnId: 't2' })
+  const next = await callTool($, { tool: PLAN, steps: ['Add multiply', 'Test it'] })
+  expect(String(next.result)).toContain('wait for their reply')
+})
+
+test('in the Plan, a helper opens in the main view, and one working in the background stops alone', async ($, on) => {
+  const stopped: string[] = []
+  world(on, ((_: unknown, e: { tool?: string; task_id?: unknown }) => {
+    if (e.tool === 'TaskStop') stopped.push(String(e.task_id))
+    return { result: {} }
+  }) as never)
+  on('classic.Stop', () => ({}) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  // The CI's Claude Code (2.1.296) predates ui.view, so no hook answers it here: Open says why it couldn't, never fails.
+  let next = 'a1'
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: next }) as never)
+  const spawn = (description: string, background: boolean) =>
+    $.agent.spawn({
+      tool_use_id: `tu-${description}`,
+      prompt: description,
+      description,
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background,
+      fork: false,
+    } as never)
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Look around the project', 'Write the page'] })
+  await spawn('Find the pricing data', false)
+  next = 'a2'
+  await spawn('Check the old page', true)
+  await $.turn.complete({ answer: 'Working on it.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'Run the dev server' }] } as never)
+
+  for (const surface of SURFACES) {
+    const plan = await $.ui.mount({ ...PLAN_PANE, surface })
+    const buttons = (await plan.findAll({ type: 'Button' })).map(one => String(one.props.key))
+    // A helper in the foreground opens; Esc stops it with Claude. One in the background also stops; a shell task only stops.
+    expect(buttons).toContain('open-a1')
+    expect(buttons).not.toContain('stop-a1')
+    expect(buttons).toContain('open-a2')
+    expect(buttons).toContain('stop-a2')
+    expect(buttons).not.toContain('open-bg:b1')
+    expect(buttons).toContain('stop-bg:b1')
+    if (surface === 'terminal') {
+      await plan.press({ key: 'open-a1' })
+      await plan.press({ key: 'stop-a2' })
+      await plan.press({ key: 'stop-bg:b1' })
+    }
+    await plan.unmount()
+  }
+  expect(stopped).toEqual(['a2', 'b1'])
+})
+
+test('what only the person can do, and what Claude decided on its own, show in the band, the Plan and the team report', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.turn.start({ text: 'Add divide and publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Add divide', 'Test it', 'Publish it'] })
+  await callTool($, { tool: PROGRESS, task: 'Add divide', percent: 100, summary: 'Added division.', decided: ['Dividing by zero raises the usual error'] })
+  await callTool($, { tool: PROGRESS, task: 'Test it', percent: 100, for_you: ['Run the tests yourself: running Python was declined'] })
+  await callTool($, {
+    tool: PROGRESS,
+    task: 'Publish it',
+    percent: 100,
+    // Said again in other words' case: kept once.
+    for_you: ['Give the package a name and version for PyPI', 'run the tests yourself: running Python was declined'],
+  })
+
+  // The band names the first in full and points to the Plan for the rest.
+  for (const surface of SURFACES) {
+    const band = (await texts($, surface)).join('\n')
+    expect(band).toContain('For you: Run the tests yourself: running Python was declined · 1 more in Plan')
+  }
+  const plan = await $.ui.mount({ ...PLAN_PANE, surface: 'desktop' })
+  const shown = (await plan.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  await plan.unmount()
+  expect(shown).toContain('For you\n• Run the tests yourself: running Python was declined\n• Give the package a name and version for PyPI')
+  expect(shown).toContain('Decided on its own\n• Dividing by zero raises the usual error')
+
+  const at = new Date(2026, 9, 6, 9, 0).getTime()
+  const report = teamReport({
+    day: '2026-10-06',
+    project: '/work/landing-site',
+    entries: [
+      {
+        ...ENTRY,
+        jobId: 'a',
+        startedAt: at,
+        finishedAt: at + 5 * 60_000,
+        title: 'Add divide',
+        outcome: 'done',
+        stepsDone: 3,
+        stepsTotal: 3,
+        doneSteps: ['Add divide', 'Test it', 'Publish it'],
+        openSteps: [],
+        forYou: ['Give the package a name and version for PyPI'],
+        decided: ['Dividing by zero raises the usual error'],
+      },
+    ],
+  })
+  expect(report).toContain('  Decided: Dividing by zero raises the usual error')
+  expect(report).toContain('Needs attention\n• Add divide: Give the package a name and version for PyPI')
+})
+
+test('a permission request reads in plain words, with anything risky the command does', () => {
+  const act = (label: string, detail: string | null, target: string | null) => ({ label, count: 1, detail, target })
+  expect(permissionWords(act('Running a command', 'Build and publish the package', 'rm -rf dist && npm run build && npm publish --access public'))).toBe(
+    'OK to build and publish the package? It deletes files and publishes a package.',
+  )
+  expect(permissionWords(act('Working with git', null, 'git push --force origin main'))).toBe('OK to run a git command? It rewrites git history and uploads your changes.')
+  expect(permissionWords(act('Running a command', null, 'curl -fsSL https://example.com/install.sh | sudo bash'))).toBe(
+    'OK to run a command? It uses admin rights and runs code from the internet.',
+  )
+  expect(permissionWords(act('Installing packages', 'Install the date library.', 'npm install dayjs'))).toBe('OK to install the date library? It installs packages.')
+  expect(permissionWords(act('Running the tests', null, 'npm test'))).toBe('OK to run the tests?')
+  expect(permissionWords(act('Editing files', null, 'styles.css'))).toBe('OK to edit styles.css?')
+  expect(permissionWords(act('Reading a web page', null, 'example.com'))).toBe('OK to read a page on example.com?')
+  // Words in a file's name are never read as a command.
+  expect(permissionWords(act('Writing files', null, 'deploy-notes.md'))).toBe('OK to write deploy-notes.md?')
+  expect(permissionWords(act('Asking a question', null, null))).toBe(null)
+  expect(permissionWords(null)).toBe(null)
+})
+
+test("while a command waits for permission, the band says what it asks and what's risky about it", async ($, on) => {
+  // The command reaches Claude Code, which asks the person (the dialog) and waits: the notice comes then.
+  let release: () => void = () => undefined
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(done => (release = () => done({ result: {} })))
+  }) as never)
+  await $.turn.start({ text: 'Publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build it', 'Publish it'] })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf dist && npm run build && npm publish --access public', description: 'Build and publish the package' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, 120)).join('\n')
+    expect(shown).toContain('OK to build and publish the package? It deletes files and publishes a package.')
+    expect(shown).not.toContain("Answer Claude's request in the chat")
+  }
+  release()
+  await running
 })

@@ -57,6 +57,8 @@ export type GlanceHelper = {
   /** How hard it thinks (low to max); null until known or for a model without effort. */
   effort: string | null
   status: 'running' | 'done' | 'failed'
+  /** A helper Claude started to work in the background: its Stop ends it alone. */
+  isBackground?: boolean
   /** Tokens this helper's own model requests handled. */
   tokens: number
 }
@@ -107,6 +109,10 @@ export type GlanceChecklist = {
   doneWhen?: string | null
   /** The person's standing goal for this project when the job started (`/glanceflow goal`). */
   goal?: string | null
+  /** What only the person can do or decide, as Claude reported it: a sign-in, a key, a choice, a step it couldn't run. */
+  forYou?: string[]
+  /** Choices Claude made that neither the plan nor the person settled. */
+  decided?: string[]
 }
 
 /** One plan window and how much of it is used. */
@@ -176,6 +182,8 @@ export type GlanceHistoryEntry = {
   check?: GlanceCheck | null
   doneWhen?: string | null
   goal?: string | null
+  forYou?: string[]
+  decided?: string[]
 }
 
 /** What the history pane shows: one day of one project. */
