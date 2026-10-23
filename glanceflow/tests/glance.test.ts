@@ -5437,9 +5437,10 @@ describe("Claude Desktop's own task list", () => {
     for (const input of [{}, { items: [] }, { items: 'Build' }, { items: [{ content: 'Build', status: 'someday' }] }, { items: [{ status: 'pending' }] }]) {
       await callTool($, { tool: NATIVE, ...input })
     }
-    // Moves on a list it never saw do nothing either.
-    await callTool($, { tool: NATIVE, advance: true })
-    await callTool($, { tool: NATIVE, done: [1], start: 2 })
+    // Moves it can't read do nothing either.
+    for (const input of [{ advance: 'yes' }, { advance: false }, { done: [0] }, { done: 2 }, { start: 1.5 }, { done: ['1'] }]) {
+      await callTool($, { tool: NATIVE, ...input })
+    }
     expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
     expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
     // On a native list, a step number past its end changes nothing.
@@ -5510,6 +5511,64 @@ describe("Claude Desktop's own task list", () => {
     shown = await desktop($)
     expect(shown).toContain('Stuck')
     expect(shown).toContain("3 more in Claude's task list")
+  })
+
+  test('a move before any items means its list is in use: no plan_steps, no fold, and later items become the checklist', async ($, on) => {
+    world(on)
+    for (const [index, move] of [{ advance: true }, { done: [1], start: 2 }, { start: 1 }].entries()) {
+      await $.turn.start({ text: 'Keep going', turnId: `t${index}` })
+      expect((await callTool($, { tool: NATIVE, ...move })).deny).toBeUndefined()
+      expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toBeUndefined()
+      expect((await callTool($, { tool: PLAN, steps: ['Another', 'Plan'] })).deny).toContain('update_plan')
+      const shown = await desktop($)
+      expect(shown).not.toContain("Claude's task list")
+      for (const name of STEPS) expect(shown).not.toContain(name)
+    }
+
+    await callTool($, { tool: NATIVE, items: items(STEPS, 1), scope: 'continuation' })
+    const plan = await planPaneTexts($)
+    for (const name of STEPS) expect(plan).toContain(name)
+    expect(plan.match(/Build the page/g)?.length).toBe(1)
+    expect(await desktop($)).toContain("2 more in Claude's task list")
+    await callTool($, { tool: NATIVE, advance: true })
+    expect(await rows($, 'terminal')).toMatch(/▶ \nAdd the form/)
+  })
+
+  test('other connected apps never stand in for its list', async ($, on) => {
+    world(on)
+    await $.turn.start({ text: 'Keep going', turnId: 't1' })
+    for (const tool of ['mcp__other__update_plan', 'mcp__ccd_turn__update_plans', 'mcp__ccd_turn__other']) {
+      await callTool($, { tool, advance: true, items: items(STEPS) })
+    }
+    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
+    expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
+  })
+
+  test('wrap_up asking the person something keeps the job on Needs you with that question, even with no "?" in the answer', async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, { tool: NATIVE, done: [1, 2, 3, 4] })
+    await callTool($, { tool: WRAP_UP, recap: 'Built the page.', ask: 'Deploy it to production now' })
+    await $.turn.complete({ answer: 'Built the page.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const shown = await rows($, surface)
+      expect(shown).toContain('Needs you')
+      expect(shown).toContain('Deploy it to production now')
+      expect(shown).not.toContain('All done')
+    }
+  })
+
+  test('wrap_up with no question, or an empty one, still ends on All done', async ($, on) => {
+    world(on)
+    for (const [index, ask] of [undefined, '', '   ', 7].entries()) {
+      await $.turn.start({ text: 'Build my landing page', turnId: `t${index}` })
+      await callTool($, { tool: NATIVE, items: items(STEPS) })
+      await callTool($, { tool: WRAP_UP, recap: 'Built the page.', ...(ask === undefined ? {} : { ask }) })
+      await $.turn.complete({ answer: 'Built the page.', durationMs: 1, isAborted: false, turnId: `t${index}`, reason: 'answer' })
+      const shown = await rows($, 'terminal')
+      expect(shown).toContain('All done')
+      expect(shown).not.toContain('Needs you')
+    }
   })
 
   test('Claude is told to keep its own task list as the plan, and the fold reads in Greek', async ($, on) => {

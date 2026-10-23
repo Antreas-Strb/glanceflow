@@ -1236,6 +1236,32 @@ export function todosToTasks(
 
 const NATIVE_STATUS = ['completed', 'in_progress', 'pending']
 const finished = (one: GlanceTask): GlanceTask => ({ ...one, status: 'done', percent: 100, hasReported: true })
+const isStep = (number: unknown) => Number.isInteger(number) && Number(number) >= 1
+const isItems = (items: unknown): items is { content: string; status: string }[] =>
+  Array.isArray(items) &&
+  items.length > 0 &&
+  items.every(one => typeof one?.content === 'string' && one.content.trim() !== '' && NATIVE_STATUS.includes(String(one.status)))
+
+/**
+ * A call Claude Desktop's own task list reads: valid `items`, `advance`, or step numbers to mark `done` or `start`.
+ * Any one of them, even a move before a list, means that list is this job's plan.
+ */
+export function isNativeCall(input: unknown): boolean {
+  const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
+  if (call.items !== undefined) return isItems(call.items)
+  if (call.advance === true) return true
+  if (call.done === undefined && call.start === undefined) return false
+  return (call.done === undefined || (Array.isArray(call.done) && call.done.every(isStep))) && (call.start === undefined || isStep(call.start))
+}
+
+/** The question Claude Desktop's end-of-turn box asks the person (wrap_up's `ask`), as one plain line, or null. */
+export function nativeAsk(input: unknown): string | null {
+  const ask = ((input ?? {}) as { ask?: unknown }).ask
+  if (typeof ask !== 'string') return null
+  const line = maskPrivate(ask.replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim())
+
+  return line === '' ? null : line.length > MAX_QUESTION ? `${line.slice(0, MAX_QUESTION - 1)}…` : line
+}
 
 /**
  * Claude Desktop's own task list call as checklist steps: a new list of `items`, `advance` to the next step, or the
@@ -1244,13 +1270,7 @@ const finished = (one: GlanceTask): GlanceTask => ({ ...one, status: 'done', per
  */
 export function nativePlan(input: unknown, previous: GlanceTask[], isNative: boolean): GlanceTask[] | null {
   const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
-  if (call.items !== undefined) {
-    const items = Array.isArray(call.items) ? (call.items as { content?: unknown; status?: unknown }[]) : []
-    const isValid =
-      items.length > 0 &&
-      items.every(one => typeof one?.content === 'string' && one.content.trim() !== '' && NATIVE_STATUS.includes(String(one.status)))
-    return isValid ? todosToTasks(items as { content: string; status: string }[], previous) : null
-  }
+  if (call.items !== undefined) return isItems(call.items) ? todosToTasks(call.items, previous) : null
   if (!isNative) return null
   if (call.advance === true) {
     const active = previous.findIndex(one => one.status === 'active')

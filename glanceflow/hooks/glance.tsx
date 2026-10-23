@@ -44,6 +44,8 @@ import {
   MAX_NAME,
   NATIVE_PLAN,
   NATIVE_WRAP_UP,
+  isNativeCall,
+  nativeAsk,
   nativePlan,
   PLUGIN,
   QUESTION,
@@ -352,6 +354,8 @@ let isDeclining = false
 // checklist, with no second approval.
 let isPlanMode = false
 let isPlanApproved = false
+// The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
+let wrapUpAsk: string | null = null
 
 /** Ship it is over in this chat: its merge guard no longer applies. */
 const endShipping = () => {
@@ -1911,6 +1915,7 @@ export function registerGlance(on: On): void {
 
   on('turn.start', async ($, e, next) => {
     runningTurn = e.turnId
+    wrapUpAsk = null
     noteSign($)
     const text = ownWords(e.text)
     // Ship it, on a turn the person started (not a continuation or a slash command). Only the exact reply
@@ -1987,7 +1992,7 @@ export function registerGlance(on: On): void {
       return { deny: PLAN_MODE_WAIT }
     }
     // Claude Desktop's own task list is this job's plan once seen: no second list beside it.
-    if (tool === PLAN_TOOL && (await read($, checklistAtom))?.isNative && (await read($, enabledAtom))) {
+    if (tool === PLAN_TOOL && (await read($, checklistAtom))?.hasNativeList && (await read($, enabledAtom))) {
       return { deny: `Claude's own task list is this job's plan: keep it with ${NATIVE_PLAN}, and report each step with ${PROGRESS_TOOL} by the same name.` }
     }
     if (tool === PLAN_TOOL) {
@@ -2097,7 +2102,7 @@ export function registerGlance(on: On): void {
 
     const isEnabled = await read($, enabledAtom)
     const list = await read($, checklistAtom)
-    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !isPlanMode) {
+    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
       return {
         deny: `Call ${PLAN_TOOL} first to lay out the plan in plain English (load it with ToolSearch if it is deferred), then try again.`,
       }
@@ -2183,12 +2188,14 @@ export function registerGlance(on: On): void {
       const planned = await now($)
       await change($, current => {
         const tasks = nativePlan(e, current.tasks, current.isNative === true)
-        if (tasks === null) return current
+        // A move before any items still means the list is in use: no plan_steps, but no steps to fold yet either.
+        if (tasks === null) return isNativeCall(e) ? { ...current, hasNativeList: true } : current
         isAdopted = true
         return {
           ...current,
           hasPlan: true,
           isNative: true,
+          hasNativeList: true,
           planAt: current.planAt ?? planned,
           plannedCount: current.hasPlan ? current.plannedCount : tasks.length,
           tasks,
@@ -2196,7 +2203,8 @@ export function registerGlance(on: On): void {
       })
       if (isAdopted && isItems) await holdForApproval($)
     } else if (tool === NATIVE_WRAP_UP) {
-      // The turn's close: whatever is left of Claude's own list is done.
+      // The turn's close: whatever is left of Claude's own list is done. A question in its box still needs the person.
+      wrapUpAsk = nativeAsk(e)
       await change($, current =>
         current.isNative ? { ...current, tasks: current.tasks.map(one => (one.status === 'done' ? one : { ...one, status: 'done' as const, percent: 100, hasReported: true })) } : current,
       )
@@ -2287,6 +2295,8 @@ export function registerGlance(on: On): void {
     }
     const list = await read($, checklistAtom)
     runningTurn = undefined
+    const wrappedAsk = wrapUpAsk
+    wrapUpAsk = null
     const wasPaused = isPausing
     isPausing = false
     // Ship it's merge request: the exact head commit asked about stays pending until the person replies, and an
@@ -2321,7 +2331,7 @@ export function registerGlance(on: On): void {
         await change($, current => ({ ...current, phase: 'stopped', stopKind: 'esc', needsYouReason: null, finishedAt: finished }))
       } else if (list.hasPlan && hasUnfinishedWork(list.tasks)) {
         // A helper still running means Claude waits for it, not for the person.
-        const asked = questionOf(e.answer ?? '')
+        const asked = wrappedAsk ?? questionOf(e.answer ?? '')
         await change($, current =>
           isBusy(current)
             ? current
@@ -2334,8 +2344,8 @@ export function registerGlance(on: On): void {
           tasks: current.hasPlan ? current.tasks : carryTokens(current.tasks, [task(tr('Answer your question'), 'done')]),
         }))
         // A finished job whose last message asks something, or asks to approve a merge, still waits for the person.
-        const asked = askedSha !== null ? tr('Reply exactly: Approve merge {0}', askedSha) : questionOf(e.answer ?? '')
-        const isAsking = askedSha !== null || asksQuestion(e.answer ?? '')
+        const asked = askedSha !== null ? tr('Reply exactly: Approve merge {0}', askedSha) : (wrappedAsk ?? questionOf(e.answer ?? ''))
+        const isAsking = askedSha !== null || wrappedAsk !== null || asksQuestion(e.answer ?? '')
         await change($, current => ({
           ...current,
           phase: isAsking ? 'needsYou' : 'done',

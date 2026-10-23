@@ -78,6 +78,8 @@ export type GlanceChecklist = {
   hasPlan: boolean
   /** True once Claude Desktop's own task list laid out this job's steps: that list is the plan, and the band folds it. */
   isNative?: boolean
+  /** True once this job made any call Claude Desktop's own task list reads, even a move before its steps: no plan_steps. */
+  hasNativeList?: boolean
   /** The turn that started this job; a late job name for another job is ignored. */
   jobId: string
   /** When the real plan arrived; the time-left estimate counts from here. */
