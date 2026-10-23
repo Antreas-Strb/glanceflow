@@ -246,6 +246,8 @@ declare module 'claude-code' {
       otherChats: GlanceOtherChat[]
       /** Whether the band names the other chats at all: off before sharing the screen, say. */
       showsOthers: boolean
+      /** The language GlanceFlow speaks: English, or Greek. */
+      language: 'en' | 'el'
     }
   }
 }

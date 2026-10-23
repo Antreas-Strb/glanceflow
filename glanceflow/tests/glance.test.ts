@@ -7,6 +7,7 @@ import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isCon
 import { findSecrets, maskPrivate } from '../hooks/privacy'
 import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
+import { GREEK } from '../hooks/words'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
 const PROGRESS = 'mcp__glanceflow__report_progress'
@@ -5275,4 +5276,101 @@ test('in a narrow band a long permission request gets its own line, so its risk 
     expect(shown.some(one => one.includes('Needs you'))).toBe(true)
     expect(shown.join('\n')).not.toContain('It…')
   }
+})
+
+test('in Greek, a job waiting on a permission reads in Greek on every surface, with no English words of its own left', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  expect((await $.command.run({ command: 'glanceflow', args: 'language el' } as never)) as unknown).toEqual({ text: 'Το GlanceFlow μιλάει πλέον Ελληνικά.' })
+  await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the page', 'Publish the site'] })
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, surface === 'terminal' ? 78 : 60)).join('\n')
+    expect(shown).toContain('Δουλεύει')
+    expect(shown).toContain('Επόμενο')
+    expect(shown).not.toContain('Working')
+  }
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, surface === 'terminal' ? 78 : 60)).join('\n')
+    for (const words of ['Σε χρειάζεται', 'Περιμένει', 'Η εντολή σβήνει αρχεία και το βγάζει στο διαδίκτυο.', 'Παύση', 'Πλάνο', 'Ιστορικό', 'Ρυθμίσεις']) {
+      expect(shown).toContain(words)
+    }
+    for (const words of ['Needs you', 'Waiting', 'OK to', 'deletes files', 'Pause', 'Plan', 'History', 'Settings', 'Next', 'Status', 'View']) {
+      expect(shown).not.toContain(words)
+    }
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
+})
+
+test('the Language setting shows in Settings, in the language picked, and /glanceflow language en switches back', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  const shown = async (surface: (typeof SURFACES)[number]) => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface })
+    const words = [...(await ui.findAll({ type: 'Text' })), ...(await ui.findAll({ type: 'Button' }))].map(one => one.text)
+    const menus = (await ui.findAll({ type: 'Select' })).map(one => {
+      const props = one.props as { value?: string; options?: { value: string; label: string }[] }
+      return props.options?.find(option => option.value === props.value)?.label ?? ''
+    })
+    await ui.unmount()
+    return [...words, ...menus].join('\n')
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language el' } as never)
+  const terminal = await shown('terminal')
+  for (const words of ['Ρυθμίσεις GlanceFlow', 'Γλώσσα', '● Ελληνικά', '○ English', 'Προβολή', 'Ήχοι', 'Επαναφορά αρχικών']) expect(terminal).toContain(words)
+  for (const words of ['Language', 'Sounds', 'Reset to defaults', 'Changes apply']) expect(terminal).not.toContain(words)
+  const desktop = await shown('desktop')
+  expect(desktop).toContain('Γλώσσα')
+  expect(desktop).toContain('Ελληνικά')
+  expect(desktop).not.toContain('Language')
+
+  expect((await $.command.run({ command: 'glanceflow', args: 'language en' } as never)) as unknown).toEqual({ text: 'GlanceFlow speaks English now.' })
+  const english = await shown('terminal')
+  for (const words of ['GlanceFlow settings', 'Language', '● English', '○ Ελληνικά', 'Sounds']) expect(english).toContain(words)
+  expect(english).not.toContain('Γλώσσα')
+})
+
+test('every Greek line is there, and keeps the values its English line has', () => {
+  for (const [english, greek] of Object.entries(GREEK)) {
+    expect(typeof greek === 'string' && greek.trim() !== '').toBe(true)
+    expect((greek.match(/\{\d\}/g) ?? []).sort()).toEqual((english.match(/\{\d\}/g) ?? []).sort())
+  }
+})
+
+test('in Greek, Claude is asked to write the checklist in Greek, a Greek request is its own title, and a permission request reads as Greek', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const languageSection = async () => {
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    return (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:language')?.text
+  }
+  expect(await languageSection()).toBeUndefined()
+  await $.command.run({ command: 'glanceflow', args: 'language el' } as never)
+  expect(await languageSection()).toContain('in plain everyday Greek')
+
+  // The request itself is the title until Haiku names it, not an English placeholder.
+  await $.turn.start({ text: 'Ανέβασε τη σελίδα μου', turnId: 't1' })
+  expect((await texts($, 'terminal', 100)).join('\n')).toContain('Ανέβασε τη σελίδα μου')
+  await callTool($, { tool: PLAN, steps: ['Φτιάξε τη σελίδα', 'Ανέβασέ τη'] })
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Δημοσίευση της σελίδας' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    expect((await texts($, surface, 120)).join('\n')).toContain('Δημοσίευση της σελίδας: εντάξει; Η εντολή σβήνει αρχεία και το βγάζει στο διαδίκτυο.')
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
 })
