@@ -69,6 +69,7 @@ The button above the prompt cycles **Simple → Details → Off**; in the Deskto
 - **Which files changed:** **▤ Plan** lists under each step the files Claude added or changed in it (`Added contact.html · changed styles.css and index.html`), helpers' edits included, and ≣ History shows them under each job. Names only; the folder shows where two files share a name.
 - **Sounds, if you want them:** `/glanceflow sound on` plays a short chime when Claude needs you, gets stuck, or finishes a job that took over a minute, so you can look away. `/glanceflow sound voice` also says it ("Claude needs you"). Off by default (turn it on in ⚙ Settings). Works on macOS, Windows and Linux; on Linux it uses the sound player the computer has (PipeWire, PulseAudio or ALSA) and, for the words, speech-dispatcher or eSpeak.
 - **Desktop notices, if you want them:** `/glanceflow notify on` shows a notice from your computer when Claude needs you, gets stuck, or finishes a job that took over a minute, with the reason in it. You see it even while you work in another app. It goes through Claude Code first, so a [Notification hook](https://code.claude.com/docs/en/hooks) you set up (a phone push, ntfy, Slack) gets it too, as `plugin_notification`, and you hear about it away from your desk; where Claude Code shows no text (the Desktop app, a bare bell), your computer shows it. Off by default (turn it on in ⚙ Settings). Works on macOS, Windows and Linux.
+- **In Greek:** `/glanceflow language el` (or **Language** in ⚙ Settings) shows all of GlanceFlow in Greek: the band, the Plan, History, Settings, notices and the Team report. Claude then writes the steps, what each got done and the For you items in Greek too, and a Greek request keeps its own words as the job's title. `/glanceflow language en` goes back to English, the default.
 - **Calm mode:** `/glanceflow calm on` stops everything that moves (the sweeping bar, the helper spinners) and shows statuses in bold.
 - **Status at a glance:** every status says what is happening and, when Claude needs you, where to answer. A finished job whose last message asks you something (a `?`, or `;` in Greek) shows **Needs you** and chimes, instead of **All done**. When Claude ends on a question, the **Needs you** line shows the question itself, in Claude's own last sentence (`Which colour should the buttons be?`), so you don't have to look through the chat for it. The status line and the desktop notice say the same: one plain line of up to 160 characters, with keys and passwords masked. Claude waiting for its own helpers is never **Needs you**.
 - **May be stuck:** if Claude shows nothing new for 3 minutes while it works (no reply, no step starting or ending), the checklist shows **Stuck** with `no news for 3 minutes` and tells you that Esc stops Claude. With sounds or desktop notices on, you hear or see it too. It clears by itself as soon as Claude moves again.
@@ -177,6 +178,7 @@ The steps follow the finish flow of [Ponytail](https://github.com/DietrichGebert
 | `/glanceflow sound on`, `/glanceflow sound voice`, `/glanceflow sound off` | A chime (and words) when Claude needs you, gets stuck or finishes a long job |
 | `/glanceflow notify on`, `/glanceflow notify off` | A notice from your computer when Claude needs you, gets stuck or finishes a long job |
 | `/glanceflow calm on`, `/glanceflow calm off` | Nothing moves; statuses in bold |
+| `/glanceflow language el`, `/glanceflow language en` | GlanceFlow in Greek, or in English (the default) |
 | `/glanceflow others on`, `/glanceflow others off` | Whether the band names another chat on this computer that needs you |
 | `/glanceflow guard on`, `/glanceflow guard off` | Turns the password guard on or off |
 | `/glanceflow approve on`, `/glanceflow approve off` | Claude waits for ▶ Start before it works, or starts right away |
@@ -189,6 +191,7 @@ The button above the prompt cycles Simple, Details and Off; in the Desktop app t
 
 ## Limits
 
+- In Greek, voice mode speaks Greek, which needs a Greek voice installed on the computer. Short times read `5λ 20δ` (minutes, seconds). In the detailed view at about 80 columns, a step's time note can get cut.
 - The Desktop app draws its own one-line tool summary ("Used 3 tools"); a mod can't hide it.
 - The VS Code extension (2.1.299 or later) draws no band above the prompt, so there the checklist opens in a **GlanceFlow** panel: above the prompt box in a narrow chat, beside it in one 800 pixels or wider. Closed, it comes back with `/glanceflow show`. Buttons there have no hotkeys: click them.
 - Pattern matching can't catch every secret written in plain words.

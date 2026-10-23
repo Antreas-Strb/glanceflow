@@ -1,6 +1,7 @@
 // The day's history of jobs, for a retro: pure functions, no engine calls.
 
 import type { GlanceCheck, GlanceChecklist, GlanceFile, GlanceHistoryEntry, GlanceOutcome, GlanceTask, GlanceTaskSize } from '../types'
+import { currentLang, tr } from './words'
 
 export const HISTORY_PREFIX = 'history:'
 export const HISTORY_DAYS = 30
@@ -52,16 +53,17 @@ export function filesNote(files: readonly GlanceFile[], most = 4): string {
   const counts = new Map<string, number>()
   for (const one of files) counts.set(base(one.path), (counts.get(base(one.path)) ?? 0) + 1)
   const label = (path: string) => ((counts.get(base(path)) ?? 0) > 1 ? path.split(/[\\/]/).slice(-2).join('/') : base(path))
-  const group = (verb: string, names: string[]) => {
+  const group = (isAdded: boolean, names: string[]) => {
     if (names.length === 0) return null
     const shown = names.slice(0, most)
     const more = names.length - shown.length
-    const last = more > 0 ? `${more} more` : shown.pop()
-    return `${verb} ${shown.length > 0 ? `${shown.join(', ')} and ${last}` : last}`
+    const last = more > 0 ? tr('{0} more', more) : shown.pop()!
+    const all = shown.length > 0 ? tr('{0} and {1}', shown.join(', '), last) : last
+    return isAdded ? tr('added {0}', all) : tr('changed {0}', all)
   }
   const text = [
-    group('added', files.filter(one => one.isNew).map(one => label(one.path))),
-    group('changed', files.filter(one => !one.isNew).map(one => label(one.path))),
+    group(true, files.filter(one => one.isNew).map(one => label(one.path))),
+    group(false, files.filter(one => !one.isNew).map(one => label(one.path))),
   ]
     .filter(Boolean)
     .join(' · ')
@@ -193,7 +195,7 @@ export const WEEK_DAYS = 7
 function dateLabel(day: string, options: Intl.DateTimeFormatOptions): string {
   const [year, month, date] = day.split('-').map(Number)
   try {
-    return new Date(year!, month! - 1, date!, 12).toLocaleDateString('en-GB', options)
+    return new Date(year!, month! - 1, date!, 12).toLocaleDateString(currentLang() === 'el' ? 'el-GR' : 'en-GB', options)
   } catch {
     return day
   }
@@ -208,10 +210,10 @@ export const longDay = (day: string) => dateLabel(day, { weekday: 'long', day: '
 /** Time as a manager would say it: "under a minute", "12 min", "1 h 5 min". */
 export function plainDuration(ms: number): string {
   const minutes = Math.round(ms / 60_000)
-  if (minutes < 1) return 'under a minute'
-  if (minutes < 60) return `${minutes} min`
+  if (minutes < 1) return tr('under a minute')
+  if (minutes < 60) return tr('{0} min', minutes)
 
-  return `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`
+  return minutes % 60 ? tr('{0} h {1} min', Math.floor(minutes / 60), minutes % 60) : tr('{0} h', Math.floor(minutes / 60))
 }
 
 /**
@@ -227,19 +229,21 @@ export function teamReport(
     one.finishedAt === null ? '' : ` (${plainDuration(one.finishedAt - one.startedAt)})`
   const heading =
     span === 'week'
-      ? `Weekly update · ${projectName(view.project)} · ${shortDay(shiftDay(view.day, -(WEEK_DAYS - 1)))} to ${shortDay(view.day)}`
-      : `Daily update · ${projectName(view.project)} · ${longDay(view.day)}`
+      ? tr('Weekly update · {0} · {1} to {2}', projectName(view.project), shortDay(shiftDay(view.day, -(WEEK_DAYS - 1))), shortDay(view.day))
+      : tr('Daily update · {0} · {1}', projectName(view.project), longDay(view.day))
   // Each standing goal the jobs worked toward, and how they did.
   const goals = [...new Set(jobs.map(one => one.goal).filter(Boolean))].map(goal => {
     const toward = jobs.filter(one => one.goal === goal)
     const finished = toward.filter(one => one.outcome === 'done').length
     const tested = toward.filter(one => one.check === 'passed').length
-    return `Goal: ${goal} · ${toward.length} task${toward.length === 1 ? '' : 's'}, ${finished} finished, ${tested} tested`
+    return toward.length === 1
+      ? tr('Goal: {0} · 1 task, {1} finished, {2} tested', goal!, finished, tested)
+      : tr('Goal: {0} · {1} tasks, {2} finished, {3} tested', goal!, toward.length, finished, tested)
   })
   const lines = [heading, ...goals, '']
 
   if (jobs.length === 0) {
-    return [...lines, `No planned work was recorded ${span === 'week' ? 'this week' : 'on this day'}.`].join('\n')
+    return [...lines, span === 'week' ? tr('No planned work was recorded this week.') : tr('No planned work was recorded on this day.')].join('\n')
   }
 
   const done = jobs.filter(one => one.outcome === 'done')
@@ -247,11 +251,11 @@ export function teamReport(
   const blocked = jobs.filter(one => one.outcome === 'stuck')
 
   if (done.length > 0) {
-    lines.push('Done')
+    lines.push(tr('Done'))
     for (const one of done) {
-      lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${CHECK_WORDS[one.check]}` : ''}`)
-      if (one.doneWhen) lines.push(`  Done when: ${one.doneWhen}`)
-      for (const item of one.decided ?? []) lines.push(`  Decided: ${item}`)
+      lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${tr(CHECK_WORDS[one.check])}` : ''}`)
+      if (one.doneWhen) lines.push(`  ${tr('Done when: {0}', one.doneWhen)}`)
+      for (const item of one.decided ?? []) lines.push(`  ${tr('Decided: {0}', item)}`)
       const notes = one.doneNotes ?? []
       if (notes.some(Boolean)) {
         // What each step got done, in Claude's words where it gave them.
@@ -264,26 +268,34 @@ export function teamReport(
   }
   if (open.length > 0) {
     // "Open", not "in progress": a stopped job is here too, and nobody may be on it right now.
-    lines.push('Still open')
+    lines.push(tr('Still open'))
     for (const one of open) {
-      const next = one.openSteps[0] ? `; next: ${one.openSteps[0].charAt(0).toLowerCase()}${one.openSteps[0].slice(1)}` : ''
-      lines.push(`• ${one.title}: ${one.doneSteps.length} of ${one.stepsTotal} steps done${next}`)
-      for (const item of one.decided ?? []) lines.push(`  Decided: ${item}`)
+      const next = one.openSteps[0] ? `${one.openSteps[0].charAt(0).toLowerCase()}${one.openSteps[0].slice(1)}` : ''
+      lines.push(
+        `• ${
+          next
+            ? tr('{0}: {1} of {2} steps done; next: {3}', one.title, one.doneSteps.length, one.stepsTotal, next)
+            : tr('{0}: {1} of {2} steps done', one.title, one.doneSteps.length, one.stepsTotal)
+        }`,
+      )
+      for (const item of one.decided ?? []) lines.push(`  ${tr('Decided: {0}', item)}`)
     }
     lines.push('')
   }
   // What only the person can do or decide, from any job, and the jobs that got stuck.
   const forYou = jobs.flatMap(one => (one.forYou ?? []).map(item => `• ${one.title}: ${item}`))
   if (blocked.length > 0 || forYou.length > 0) {
-    lines.push('Needs attention')
-    for (const one of blocked) lines.push(`• ${one.title}: it got stuck and needs a decision`)
+    lines.push(tr('Needs attention'))
+    for (const one of blocked) lines.push(`• ${tr('{0}: it got stuck and needs a decision', one.title)}`)
     lines.push(...forYou)
     lines.push('')
   }
 
   const time = jobs.reduce((sum, one) => sum + (one.finishedAt === null ? 0 : one.finishedAt - one.startedAt), 0)
   lines.push(
-    `${done.length} of ${jobs.length} ${jobs.length === 1 ? 'task' : 'tasks'} finished · ${plainDuration(time)} of work`,
+    jobs.length === 1
+      ? tr('{0} of 1 task finished · {1} of work', done.length, plainDuration(time))
+      : tr('{0} of {1} tasks finished · {2} of work', done.length, jobs.length, plainDuration(time)),
   )
 
   return lines.join('\n')
@@ -297,12 +309,13 @@ const weekday = (day: string) => dateLabel(day, { weekday: 'long' })
  */
 export function weekSummary(entries: readonly GlanceHistoryEntry[], day: string): string {
   const jobs = entries.filter(one => !one.isQuickAnswer)
-  const heading = `Your week with Claude · ${shortDay(shiftDay(day, -(WEEK_DAYS - 1)))} to ${shortDay(day)}`
+  const heading = tr('Your week with Claude · {0} to {1}', shortDay(shiftDay(day, -(WEEK_DAYS - 1))), shortDay(day))
   if (jobs.length === 0) {
-    return `${heading}\n\nNo planned work was recorded this week. Ask Claude for something with a few steps, and it shows here.`
+    return `${heading}\n\n${tr('No planned work was recorded this week. Ask Claude for something with a few steps, and it shows here.')}`
   }
 
-  const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
+  const steps_ = (count: number) => (count === 1 ? tr('1 step') : tr('{0} steps', count))
+  const tasks_ = (count: number) => (count === 1 ? tr('1 task') : tr('{0} tasks', count))
   const steps = jobs.reduce((sum, one) => sum + one.doneSteps.length, 0)
   const finished = jobs.filter(one => one.outcome === 'done').length
   const time = jobs.reduce((sum, one) => sum + (one.finishedAt === null ? 0 : one.finishedAt - one.startedAt), 0)
@@ -315,13 +328,13 @@ export function weekSummary(entries: readonly GlanceHistoryEntry[], day: string)
   const lines = [
     heading,
     '',
-    `Claude checked off ${plural(steps, 'step', 'steps')} in ${plural(jobs.length, 'task', 'tasks')}, and finished ${finished} of them.`,
-    `Time at work: ${plainDuration(time)}${projects.size > 1 ? `, across ${projects.size} projects` : ''}.`,
+    tr('Claude checked off {0} in {1}, and finished {2} of them.', steps_(steps), tasks_(jobs.length), finished),
+    projects.size > 1 ? tr('Time at work: {0}, across {1} projects.', plainDuration(time), projects.size) : tr('Time at work: {0}.', plainDuration(time)),
   ]
-  if (perDay.size > 1) lines.push(`Busiest day: ${weekday(busiest)}, with ${plural(busiestCount, 'task', 'tasks')}.`)
+  if (perDay.size > 1) lines.push(tr('Busiest day: {0}, with {1}.', weekday(busiest), tasks_(busiestCount)))
   if (biggest.length > 0) {
-    lines.push('', 'Biggest tasks')
-    for (const one of biggest) lines.push(`• ${one.title} (${plural(one.doneSteps.length, 'step', 'steps')})`)
+    lines.push('', tr('Biggest tasks'))
+    for (const one of biggest) lines.push(`• ${one.title} (${steps_(one.doneSteps.length)})`)
   }
 
   return lines.join('\n')

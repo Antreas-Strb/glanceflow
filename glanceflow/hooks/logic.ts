@@ -1,6 +1,7 @@
 import type { GlanceCheck, GlanceChecklist, GlanceHelper, GlanceHistoryView, GlanceOtherChat, GlanceTask, GlanceTaskSize, GlanceUsage } from '../types'
 import { SIZE_WEIGHT, teamReport, weekSummary } from './history'
 import { maskPrivate } from './privacy'
+import { currentLang, tr } from './words'
 
 // History reads them too, so they live there.
 export { CHECK_WORDS, jobCheck } from './history'
@@ -8,7 +9,7 @@ export { CHECK_WORDS, jobCheck } from './history'
 export const PLUGIN = 'glanceflow'
 
 export const tourNeeds = (mark: string) =>
-  `When Claude needs you, the checklist says Needs you ${mark}, and what to do. Turn on sounds or desktop notices in Settings to hear or see it from another app.`
+  tr('When Claude needs you, the checklist says Needs you {0}, and what to do. Turn on sounds or desktop notices in Settings to hear or see it from another app.', mark)
 
 export const MAX_NAME = 40
 
@@ -38,8 +39,8 @@ export function resetTime(resetsAt: string | null, at: number): string | null {
   const when = resetsAt ? new Date(resetsAt) : null
   if (when === null || Number.isNaN(when.getTime())) return null
   const time = `${pad2(when.getHours())}:${pad2(when.getMinutes())}`
-  if (when.getTime() - at <= 24 * 3_600_000) return `at ${time}`
-  return `on ${when.toLocaleDateString('en-GB', { weekday: 'short' })} at ${time}`
+  if (when.getTime() - at <= 24 * 3_600_000) return tr('at {0}', time)
+  return tr('on {0} at {1}', when.toLocaleDateString(currentLang() === 'el' ? 'el-GR' : 'en-GB', { weekday: 'short' }), time)
 }
 
 /** Turns any step or job name, or a step's summary, into short plain English. */
@@ -51,7 +52,7 @@ export function cleanName(raw: unknown, max = MAX_NAME): string {
     .filter(word => word && !word.includes('•') && !/[/\\]/.test(word) && !CODE_FILE.test(word))
   let name = words.join(' ').replace(/\s+/g, ' ').trim()
   if (!name) {
-    return 'Working on it'
+    return tr('Working on it')
   }
   name = name.charAt(0).toUpperCase() + name.slice(1)
   if (name.length <= max) {
@@ -96,19 +97,20 @@ export function apiErrorSentence(kind: string, details = ''): string {
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000))
   if (seconds < 60) {
-    return `${seconds}s`
+    return tr('{0}s', seconds)
   }
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) {
-    return `${minutes}m ${seconds % 60}s`
+    return tr('{0}m {1}s', minutes, seconds % 60)
   }
 
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  return tr('{0}h {1}m', Math.floor(minutes / 60), minutes % 60)
 }
 
 /** A duration where words flow (the desktop): a whole minute drops its seconds, `1m` rather than `1m 0s`. */
 export function durationWords(ms: number): string {
-  return formatDuration(ms).replace(/^(\d+m) 0s$/, '$1')
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  return seconds >= 60 && seconds < 3600 && seconds % 60 === 0 ? tr('{0}m', seconds / 60) : formatDuration(ms)
 }
 
 /** Terminal cells a character takes: two for CJK and emoji, none for joiners and accents. */
@@ -189,9 +191,9 @@ export function formatTokens(count: number): string {
 /** New tokens first (what really counts), then the cheap ones read back from the cache. */
 export function tokenNote(tokens: number, cachedTokens: number): string {
   if (tokens <= 0) return ''
-  if (cachedTokens <= 0) return `${formatTokens(tokens)} tokens`
+  if (cachedTokens <= 0) return tr('{0} tokens', formatTokens(tokens))
 
-  return `${formatTokens(tokens - cachedTokens)} new · ${formatTokens(cachedTokens)} cached`
+  return tr('{0} new · {1} cached', formatTokens(tokens - cachedTokens), formatTokens(cachedTokens))
 }
 
 export function sizeOf(raw: unknown): GlanceTaskSize {
@@ -276,9 +278,9 @@ export const LONG_STEP_REPORT = 90
 
 /** A step's time left: short for the terminal's columns (`<1m left`), in words where text flows (`under a minute left`). */
 export function leftLabel(ms: number | null, isWords = false): string {
-  if (ms === null) return 'taking longer'
-  if (isWords) return ms < 60_000 ? 'under a minute left' : `about ${formatLeft(ms)} left`
-  return ms < 60_000 ? '<1m left' : `~${formatLeft(ms)} left`
+  if (ms === null) return tr('taking longer')
+  if (isWords) return ms < 60_000 ? tr('under a minute left') : tr('about {0} left', formatLeft(ms))
+  return ms < 60_000 ? tr('<1m left') : tr('~{0} left', formatLeft(ms))
 }
 
 /**
@@ -421,32 +423,32 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
 }
 
 // What each activity asks to do, as the words after "OK to"; with a file or site, its name follows.
-const ASKS: Record<string, string> = {
-  'Reading files': 'read',
-  'Searching the project': 'search the project',
-  'Editing files': 'edit',
-  'Writing files': 'write',
-  'Reading a web page': 'read a page on',
-  'Searching the web': 'search the web',
-  'Using a connected app': 'use a connected app',
-  'Running the tests': 'run the tests',
-  'Installing packages': 'install packages',
-  'Working with git': 'run a git command',
-  'Building the project': 'build the project',
-  'Running a command': 'run a command',
+const ASKS: Record<string, () => string> = {
+  'Reading files': () => tr('read'),
+  'Searching the project': () => tr('search the project'),
+  'Editing files': () => tr('edit'),
+  'Writing files': () => tr('write'),
+  'Reading a web page': () => tr('read a page on'),
+  'Searching the web': () => tr('search the web'),
+  'Using a connected app': () => tr('use a connected app'),
+  'Running the tests': () => tr('run the tests'),
+  'Installing packages': () => tr('install packages'),
+  'Working with git': () => tr('run a git command'),
+  'Building the project': () => tr('build the project'),
+  'Running a command': () => tr('run a command'),
 }
 
 // What a command does that a person should know before saying yes.
 // shortcut: reads the command's first line as text, as the activity keeps it; add a spelling here when a risky one shows up.
-const RISKS: readonly (readonly [RegExp, string])[] = [
-  [/\brm\s+-\w*[rf]|\brmdir\b|\bRemove-Item\b|\bgit\s+clean\b/i, 'deletes files'],
-  [/\bgit\s+(?:reset\s+--hard|push\s+(?:-f\b|--force)|rebase\b)/i, 'rewrites git history'],
-  [/\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bgh\s+release\s+create\b/i, 'publishes a package'],
-  [/\bgit\s+push\b|\bgh\s+pr\s+merge\b/i, 'uploads your changes'],
-  [/\bdeploy\b|\bvercel\b.*--prod/i, 'deploys online'],
-  [/\b(?:npm|pnpm|yarn|bun|pip3?|brew|cargo|gem)\s+(?:install|add|i)\b/i, 'installs packages'],
-  [/\bsudo\b/, 'uses admin rights'],
-  [/\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, 'runs code from the internet'],
+const RISKS: readonly (readonly [RegExp, () => string])[] = [
+  [/\brm\s+-\w*[rf]|\brmdir\b|\bRemove-Item\b|\bgit\s+clean\b/i, () => tr('deletes files')],
+  [/\bgit\s+(?:reset\s+--hard|push\s+(?:-f\b|--force)|rebase\b)/i, () => tr('rewrites git history')],
+  [/\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bgh\s+release\s+create\b/i, () => tr('publishes a package')],
+  [/\bgit\s+push\b|\bgh\s+pr\s+merge\b/i, () => tr('uploads your changes')],
+  [/\bdeploy\b|\bvercel\b.*--prod/i, () => tr('deploys online')],
+  [/\b(?:npm|pnpm|yarn|bun|pip3?|brew|cargo|gem)\s+(?:install|add|i)\b/i, () => tr('installs packages')],
+  [/\bsudo\b/, () => tr('uses admin rights')],
+  [/\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, () => tr('runs code from the internet')],
 ]
 
 /**
@@ -455,20 +457,25 @@ const RISKS: readonly (readonly [RegExp, string])[] = [
  */
 export function permissionWords(activity: GlanceChecklist['activity']): string | null {
   if (activity === null) return null
-  const asks = ASKS[activity.label]
+  const asks = ASKS[activity.label]?.()
   const isCommand = activity.label.startsWith('Running') || activity.label === 'Installing packages' || activity.label === 'Working with git' || activity.label === 'Building the project'
+  const said = activity.detail?.replace(/[.!]+$/, '') ?? ''
+  // English reads Claude's description after "OK to", in lower case; Greek keeps it as said, as a name.
   const what = activity.detail
-    ? `${activity.detail.charAt(0).toLowerCase()}${activity.detail.slice(1).replace(/[.!]+$/, '')}`
+    ? currentLang() === 'en'
+      ? `${said.charAt(0).toLowerCase()}${said.slice(1)}`
+      : said
     : asks === undefined
       ? null
       : !isCommand && activity.target
         ? `${asks} ${activity.target}`
         : asks
   if (what === null) return null
-  const risks = isCommand && activity.target ? RISKS.filter(([pattern]) => pattern.test(activity.target!)).map(([, words]) => words) : []
-  const and = risks.length > 1 ? `${risks.slice(0, -1).join(', ')} and ${risks[risks.length - 1]}` : (risks[0] ?? '')
+  const risks = isCommand && activity.target ? RISKS.filter(([pattern]) => pattern.test(activity.target!)).map(([, words]) => words()) : []
+  const and = risks.length > 1 ? tr('{0} and {1}', risks.slice(0, -1).join(', '), risks[risks.length - 1]!) : (risks[0] ?? '')
 
-  return `OK to ${what}?${and ? ` It ${and}.` : ''}`
+  if (activity.detail) return and ? tr('OK to {0}? It {1}.#detail', what, and) : tr('OK to {0}?#detail', what)
+  return and ? tr('OK to {0}? It {1}.', what, and) : tr('OK to {0}?', what)
 }
 
 // A piece that starts with a test, build, type check or lint command, after any VAR=x assignments. Stricter than
@@ -1167,7 +1174,7 @@ export function ownWords(text: string): string {
 export function formatLeft(ms: number): string {
   const minutes = Math.max(1, Math.round(ms / 60000))
 
-  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  return minutes < 60 ? tr('{0}m', minutes) : tr('{0}h {1}m', Math.floor(minutes / 60), minutes % 60)
 }
 
 /** Keeps exactly one active step while any step is unfinished. */
@@ -1226,14 +1233,19 @@ export function todosToTasks(
 
 /** What the notice says under its title: why Claude waits or is stuck, or the job's name. */
 export const noticeBody = (list: GlanceChecklist) =>
-  (list.phase === 'needsYou' ? needsText(list) : list.phase === 'stuck' ? list.stuckReason : null) ?? list.title
+  (list.phase === 'needsYou' ? needsText(list) : list.phase === 'stuck' && list.stuckReason !== null ? tr(list.stuckReason) : null) ?? list.title
 
 /** A job that ended: All done, or finished with a question for the person (Needs you, with a finish time). */
 export const isFinished = (list: GlanceChecklist) => list.phase === 'done' || (list.phase === 'needsYou' && list.finishedAt !== null)
 
-/** Why the person is needed: what Claude asked, when it ended on a question, else the general reason. */
-export const needsText = (list: GlanceChecklist) =>
-  (list.question && (list.needsYouReason === WAITING || list.needsYouReason === QUESTION) ? list.question : list.needsYouReason) ?? null
+/**
+ * Why the person is needed, in their language: what Claude asked, when it ended on a question, else the general reason.
+ * Reasons are kept in English, which the checks compare; they are translated only here, as they are shown.
+ */
+export const needsText = (list: GlanceChecklist) => {
+  const reason = list.question && (list.needsYouReason === WAITING || list.needsYouReason === QUESTION) ? list.question : list.needsYouReason
+  return reason ? tr(reason) : null
+}
 
 export const reportOf = (view: GlanceHistoryView) =>
   view.reportSpan === 'mine'
@@ -1280,10 +1292,10 @@ export function otherChats(saved: readonly (SavedChecklist | undefined)[], at: n
 export function otherChatsWords(others: readonly GlanceOtherChat[]): string[] {
   const waiting = others.filter(one => one.needsYou)
   const working = others.length - waiting.length
-  if (waiting.length === 0) return working === 0 ? [] : [`${working === 1 ? '1 other chat' : `${working} other chats`} at work`]
+  if (waiting.length === 0) return working === 0 ? [] : [working === 1 ? tr('1 other chat at work') : tr('{0} other chats at work', working)]
   const first =
     waiting.length === 1
-      ? `Another chat needs you: ${waiting[0]?.title ?? ''}`
-      : `${waiting.length} other chats need you: ${waiting.map(one => one.title).join(', ')}`
-  return [first, ...(working === 0 ? [] : [`${working} more at work`])]
+      ? tr('Another chat needs you: {0}', waiting[0]?.title ?? '')
+      : tr('{0} other chats need you: {1}', waiting.length, waiting.map(one => one.title).join(', '))
+  return [first, ...(working === 0 ? [] : [tr('{0} more at work', working)])]
 }

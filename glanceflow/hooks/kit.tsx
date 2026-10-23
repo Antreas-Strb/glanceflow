@@ -2,6 +2,7 @@ import type { ElementTable, RenderElement, RenderSurface } from 'claude-code'
 
 import { GLYPH, TONE_TEXT, badgeSvg, dotsSvg, iconSvg, meterSvg, openRingSvg, ringSvg } from './look'
 import type { IconName, Tone } from './look'
+import { tr } from './words'
 
 /** Icon size in the band and the panels, in CSS px: a touch smaller than the desktop's 14.5px text. */
 const ICON = 15
@@ -54,6 +55,6 @@ export function kitOf(table: ElementTable, surface: RenderSurface) {
     /** A slim bar; vector surfaces only. */
     meter: (tone: Tone, percent: number | null, sweep: number, alt: string, width = 96) => draw(meterSvg(tone, width, percent, sweep), alt, width, 6),
     /** Where the welcome cards are; vector surfaces only. */
-    dots: (count: number, current: number) => draw(dotsSvg(count, current), `Card ${current + 1} of ${count}`, count * 11 + 3, 6),
+    dots: (count: number, current: number) => draw(dotsSvg(count, current), tr('Card {0} of {1}', current + 1, count), count * 11 + 3, 6),
   }
 }

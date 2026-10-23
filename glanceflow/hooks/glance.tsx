@@ -36,6 +36,8 @@ import {
   upsertEntry,
 } from './history'
 import { findSecrets, maskPrivate } from './privacy'
+import { currentLang, setLang, tr } from './words'
+import type { Lang } from './words'
 import {
   MAX_DETAIL,
   CHECK_WORDS,
@@ -133,6 +135,7 @@ const STORE_KEY = 'glanceEnabled'
 const DETAIL_KEY = 'glanceDetail'
 const SOUND_KEY = 'glanceSound'
 const CALM_KEY = 'glanceCalm'
+const LANGUAGE_KEY = 'glanceLanguage'
 const GUARD_KEY = 'glanceGuard'
 const APPROVE_KEY = 'glanceApprove'
 const SHIP_KEY = 'glanceShip'
@@ -140,12 +143,16 @@ const NOTICE_KEY = 'glanceNotice'
 // Whether the band names the other chats that need the person; on unless turned off.
 const OTHERS_KEY = 'glanceOthers'
 const TOUR_KEY = 'glanceTour'
-/** The welcome, three short cards the first time: what the checklist is, what Needs you means, where the rest lives. */
-const TOUR_FIRST = 'A checklist shows here when you ask Claude for something with a few steps: each step, how far along it is, and about how long is left.'
-const TOUR_LAST = 'Settings, below, holds every choice. History shows your past jobs and Your week. To see this welcome again, type /glanceflow tour.'
-const TOUR = [TOUR_FIRST, tourNeeds('in yellow'), TOUR_LAST]
-/** Elsewhere than the terminal the words keep the text colour and the yellow is the bell beside them. */
-const TOUR_VECTOR = [TOUR_FIRST, tourNeeds('beside a yellow bell'), TOUR_LAST]
+/**
+ * The welcome, three short cards the first time: what the checklist is, what Needs you means, where the rest lives.
+ * Elsewhere than the terminal the words keep the text colour and the yellow is the bell beside them.
+ */
+const tourCards = (isVector: boolean) => [
+  tr('A checklist shows here when you ask Claude for something with a few steps: each step, how far along it is, and about how long is left.'),
+  tourNeeds(isVector ? tr('beside a yellow bell') : tr('in yellow')),
+  tr('Settings, below, holds every choice. History shows your past jobs and Your week. To see this welcome again, type /glanceflow tour.'),
+]
+const TOUR_CARDS = 3
 const HANDOFF_KEY = 'lastHandoff'
 // Below this width the mode button drops the name; below METER_MIN_COLUMNS the bars go, so step names keep their room.
 const NARROW = 60
@@ -188,10 +195,10 @@ const STALLED = 'no news for 3 minutes. Press Esc to stop Claude, or give it a l
 const STALL_MS = 3 * 60_000
 const PERMISSION = "Answer Claude's request in the chat"
 // What a mark beside a state's own bold word says: the word follows, so a screen reader hears it once, not twice.
-const STATUS = 'Status'
+const STATUS = () => tr('Status')
 // What a mark beside a notice says: a usage limit, a full chat, a tidy-up, a panel with nothing in it yet. The words
 // beside it say which; a panel's own name is its title's, read just before.
-const NOTICE = 'Notice'
+const NOTICE = () => tr('Notice')
 const APPROVE = 'Read the plan, then press Start or tell Claude what to change'
 
 const enabledAtom = atom({ plugin: 'glanceflow', key: 'glanceEnabled' } as const, true)
@@ -202,6 +209,8 @@ const NO_USAGE: GlanceUsage = { limits: [], limitPercent: null, limitLabel: null
 const usageAtom = atom({ plugin: 'glanceflow', key: 'usage' } as const, NO_USAGE)
 const soundAtom = atom({ plugin: 'glanceflow', key: 'soundMode' } as const, 'off')
 const calmAtom = atom({ plugin: 'glanceflow', key: 'isCalm' } as const, false)
+/** The language GlanceFlow speaks; every view reads it, so a change shows at once. */
+const languageAtom = atom({ plugin: 'glanceflow', key: 'language' } as const, 'en')
 const guardAtom = atom({ plugin: 'glanceflow', key: 'isGuarded' } as const, true)
 const approveAtom = atom({ plugin: 'glanceflow', key: 'approvePlan' } as const, false)
 const shipOnGithubAtom = atom({ plugin: 'glanceflow', key: 'shipsOnGithub' } as const, false)
@@ -282,7 +291,21 @@ The person follows your work on a checklist above the prompt, in plain English.
 - When something only the person can do or decide comes up, put it in report_progress' for_you; when you choose something neither the plan nor the person settled, put it in decided. One short line each.
 - Fill in plan_steps' done_when: what will be true when the job is done, and what other than you will show it. Make the last step that check. When the job changes code, run the project's tests, build or type check rather than saying it passed. The checklist shows whether changed code was tested.`
 
+const GREEK_SECTION = `# GlanceFlow language
+The person reads GlanceFlow in Greek. Write plan_steps' steps and done_when, report_progress' summary, for_you and
+decided, and the one-line description of each tool call in plain everyday Greek, not English. Every rule above about
+plain words applies to that Greek: short, a verb first in step names, no file names, commands or code.`
+
 const SPINNER = ['◐', '◓', '◑', '◒']
+// How many of the day's jobs ended each way, for the History's total line.
+const OUTCOME_COUNT: Record<GlanceHistoryEntry['outcome'], (count: number) => string> = {
+  done: count => tr('{0} done', count),
+  stopped: count => tr('{0} stopped', count),
+  stuck: count => tr('{0} stuck', count),
+  waiting: count => tr('{0} waiting', count),
+  background: count => tr('{0} background', count),
+  working: count => tr('{0} working', count),
+}
 const HELPERS_PER_STEP = 3
 
 // The tools that write files, and the field each names the file in.
@@ -487,7 +510,7 @@ const noticeFor = async ($: $, list: GlanceChecklist) => {
   const alert = ALERTS[list.phase]
   if (!alert || !(await read($, noticeAtom)) || !(await read($, enabledAtom))) return
   if (list.phase === 'done' && (isBusy(list) || (list.finishedAt ?? (await now($))) - list.startedAt < LONG_JOB_MS)) return
-  await showNotice($, alert.words, noticeBody(list))
+  await showNotice($, tr(alert.words), noticeBody(list))
 }
 
 /** A short sound (and, in voice mode, a few words) when Claude needs you, gets stuck or finishes a long job. */
@@ -499,7 +522,7 @@ const alertFor = async ($: $, list: GlanceChecklist) => {
   if (list.phase === 'done' && (isBusy(list) || (list.finishedAt ?? (await now($))) - list.startedAt < LONG_JOB_MS)) return
   try {
     await playSound($, alert.asset)
-    if (mode === 'voice') await sayWords($, alert.words)
+    if (mode === 'voice') await sayWords($, tr(alert.words))
   } catch {
     // No player or voice on this computer: the band still shows it.
   }
@@ -659,10 +682,11 @@ const startJob = async ($: $, text: string, jobId: string) => {
   const previous = await read($, checklistAtom)
   const known = await knownPace($)
   const list: GlanceChecklist = {
-    // Until Haiku names it in English, a request in another language shows a neutral title.
-    title: isLatinText(text.split('\n')[0] ?? '') ? cleanName(text.split('\n')[0]) : 'Working on your request',
+    // Until Haiku names it, a request in a language GlanceFlow doesn't speak shows a neutral title.
+    title:
+      isLatinText(text.split('\n')[0] ?? '') || currentLang() === 'el' ? cleanName(text.split('\n')[0]) : tr('Working on your request'),
     phase: 'working',
-    tasks: stampTimes([task('Understand your request', 'active'), task('Plan the steps', 'upcoming')], await now($)),
+    tasks: stampTimes([task(tr('Understand your request'), 'active'), task(tr('Plan the steps'), 'upcoming')], await now($)),
     needsYouReason: null,
     stuckReason: null,
     startedAt: await now($),
@@ -706,9 +730,13 @@ const nameJob = async ($: $, text: string, jobId: string) => {
       effort: 'low',
       timeoutMs: 15000,
       prompt:
-        'Name this request in 2 to 6 plain English words that start with a verb, ' +
-        'like "Build my landing page", in sentence case: only the first word and names get a capital. ' +
-        'Always in English, even when the request is in another language. ' +
+        (currentLang() === 'el'
+          ? 'Name this request in 2 to 6 plain everyday Greek words that start with a verb, ' +
+            'like "Φτιάξε τη σελίδα μου", in sentence case: only the first word and names get a capital. ' +
+            'Always in Greek, even when the request is in another language. '
+          : 'Name this request in 2 to 6 plain English words that start with a verb, ' +
+            'like "Build my landing page", in sentence case: only the first word and names get a capital. ' +
+            'Always in English, even when the request is in another language. ') +
         'No file names, code, quotes or punctuation. ' +
         // Masked like everything GlanceFlow shows: keys and personal details stay out of the naming request.
         `Reply with the name only.\n\nRequest:\n${maskPrivate(text).slice(0, 2000)}`,
@@ -767,16 +795,16 @@ const setStuck = ($: $, reason: string) =>
 /** Stops Claude's running turn; Continue picks it up again. */
 const pauseJob = async ($: $) => {
   if (runningTurn === undefined) {
-    $.ui.toast('Nothing is running right now.')
+    $.ui.toast(tr('Nothing is running right now.'))
     return
   }
   isPausing = true
   try {
     await $.turn.abort({ turnId: runningTurn })
-    $.ui.toast('Paused. Press Continue to pick up where Claude stopped.')
+    $.ui.toast(tr('Paused. Press Continue to pick up where Claude stopped.'))
   } catch {
     isPausing = false
-    $.ui.toast("Couldn't pause right now. Press Esc to stop instead.")
+    $.ui.toast(tr("Couldn't pause right now. Press Esc to stop instead."))
   }
 }
 
@@ -792,7 +820,7 @@ const sendAsUser = async ($: $, text: string, onFail: () => unknown) => {
 }
 
 /** Sends "continue" for the person: the same job goes on, nothing to type. */
-const continueJob = ($: $) => sendAsUser($, CONTINUE_TEXT, () => $.ui.toast("Couldn't continue right now. Type: continue"))
+const continueJob = ($: $) => sendAsUser($, CONTINUE_TEXT, () => $.ui.toast(tr("Couldn't continue right now. Type: continue")))
 
 /** Loads one day of this project's history into the pane, and opens the pane when asked. */
 const showHistory = async ($: $, day: string, isOpening: boolean) => {
@@ -817,16 +845,16 @@ const showHistory = async ($: $, day: string, isOpening: boolean) => {
     myWeekEntries: myWeek.map(filled),
   }))
 
-  return isOpening ? $.ui.open({ id: HISTORY_PANE, title: `History · ${projectName(project)}`, closeOnEscape: true }) : null
+  return isOpening ? $.ui.open({ id: HISTORY_PANE, title: tr('History · {0}', projectName(project)), closeOnEscape: true }) : null
 }
 
 /** Opens the whole plan in a side panel: every step, what each got done, its time and helpers. */
-const showPlan = ($: $) => $.ui.open({ id: PLAN_PANE, title: 'Plan', closeOnEscape: true })
+const showPlan = ($: $) => $.ui.open({ id: PLAN_PANE, title: tr('Plan'), closeOnEscape: true })
 
 /** Where we left off: the checkpoint Claude saved before the chat was tidied up, in a side panel. */
 const showRecap = async ($: $) => {
   await update($, recapAtom, () => false)
-  return $.ui.open({ id: RECAP_PANE, title: 'Where we left off', closeOnEscape: true })
+  return $.ui.open({ id: RECAP_PANE, title: tr('Where we left off'), closeOnEscape: true })
 }
 
 /** Shows the team report for the day or the week, or your own week across projects, and copies it. */
@@ -843,10 +871,10 @@ const showReport = async ($: $, isShown: boolean, text: string, surface?: Render
   const isMine = (await read($, historyAtom))?.reportSpan === 'mine'
   $.ui.toast(
     !copied.isCopied
-      ? 'The report is in the panel: select it there to copy it.'
+      ? tr('The report is in the panel: select it there to copy it.')
       : isMine
-        ? 'Your week copied: paste it wherever you like.'
-        : 'Team report copied: paste it into Slack, Teams or an email.',
+        ? tr('Your week copied: paste it wherever you like.')
+        : tr('Team report copied: paste it into Slack, Teams or an email.'),
   )
 }
 
@@ -874,10 +902,10 @@ const pressHandoff = async ($: $) => {
 const startFreshChat = async ($: $) => {
   await update($, handoffAtom, () => 'working')
   try {
-    $.ui.toast('Writing a handoff note for the fresh chat…')
+    $.ui.toast(tr('Writing a handoff note for the fresh chat…'))
     const reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
     if (!reply.isAnswered || !reply.text.trim()) {
-      $.ui.toast(`Couldn't write the handoff note${reply.isAnswered ? '' : ` (${reply.reason})`}. Nothing was cleared.`)
+      $.ui.toast(reply.isAnswered ? tr("Couldn't write the handoff note. Nothing was cleared.") : tr("Couldn't write the handoff note ({0}). Nothing was cleared.", reply.reason))
       return
     }
     const note = reply.text.trim()
@@ -886,14 +914,14 @@ const startFreshChat = async ($: $) => {
     try {
       await $.command.run({ command: 'clear', args: '' })
     } catch {
-      $.ui.toast("Couldn't clear the chat. Type /glanceflow handoff note to get the handoff note.")
+      $.ui.toast(tr("Couldn't clear the chat. Type /glanceflow handoff note to get the handoff note."))
       return
     }
     const isSent = await sendAsUser($, note, async () => {
       await $.prompt.fill({ text: note })
-      $.ui.toast('Chat cleared. The handoff note is in the prompt box: press Enter to send it.')
+      $.ui.toast(tr('Chat cleared. The handoff note is in the prompt box: press Enter to send it.'))
     })
-    if (isSent) $.ui.toast('Fresh chat started from a handoff note.')
+    if (isSent) $.ui.toast(tr('Fresh chat started from a handoff note.'))
   } finally {
     await update($, handoffAtom, () => 'idle')
   }
@@ -1010,10 +1038,10 @@ const addTokens = ($: $, agentId: string | undefined, usage: StepUsage) => {
 const openHelper = async ($: $, agentId: string) => {
   try {
     const shown = await $.ui.view({ agentId })
-    if ('deny' in shown && shown.deny) $.ui.toast(`Couldn't open that helper: ${shown.deny}`)
+    if ('deny' in shown && shown.deny) $.ui.toast(tr("Couldn't open that helper: {0}", shown.deny))
   } catch (error) {
     // A Claude Code older than the view has no $.ui.view to call.
-    $.ui.toast(`Couldn't open that helper: ${error instanceof TypeError ? 'this needs a newer Claude Code' : String(error)}`)
+    $.ui.toast(tr("Couldn't open that helper: {0}", error instanceof TypeError ? tr('this needs a newer Claude Code') : String(error)))
   }
 }
 
@@ -1025,7 +1053,7 @@ const stopHelper = async ($: $, helper: GlanceHelper) => {
     tool: 'TaskStop',
     task_id: taskId,
   }).catch((error: unknown) => ({ deny: String(error), isError: true, text: '' }))
-  if (failed.deny !== undefined || failed.isError) $.ui.toast(`Couldn't stop it: ${failed.deny ?? failed.text ?? 'Claude Code said no'}`)
+  if (failed.deny !== undefined || failed.isError) $.ui.toast(tr("Couldn't stop it: {0}", failed.deny ?? failed.text ?? tr('Claude Code said no')))
 }
 
 const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') => {
@@ -1041,7 +1069,7 @@ const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') =>
  * it, and it stays in Claude's instructions for the rest of this chat. Uses /compact itself when the engine refuses.
  */
 const tidyUp = async ($: $) => {
-  $.ui.toast('Saving a checkpoint, then tidying up the chat…')
+  $.ui.toast(tr('Saving a checkpoint, then tidying up the chat…'))
   let note: string | null = null
   try {
     const reply = await $.model.fork({ prompt: CHECKPOINT_PROMPT })
@@ -1054,12 +1082,12 @@ const tidyUp = async ($: $) => {
     await $.store.set(CHECKPOINT_KEY, { sessionId: await $.session.id(), at, note })
     await update($, checkpointAtom, () => at)
   } else {
-    $.ui.toast("Couldn't save a checkpoint; tidying up anyway.")
+    $.ui.toast(tr("Couldn't save a checkpoint; tidying up anyway."))
   }
   const instructions = note === null ? '' : `Keep everything in this checkpoint; it is what the work needs to carry on.\n\n${note}`
   try {
     const done = await $.session.compact(note === null ? undefined : { instructions })
-    if (done.skip !== undefined) $.ui.toast(`The chat was not tidied up: ${done.skip}`)
+    if (done.skip !== undefined) $.ui.toast(tr('The chat was not tidied up: {0}', done.skip))
     else if (note !== null) await update($, recapAtom, () => true)
     return
   } catch (refused) {
@@ -1069,7 +1097,7 @@ const tidyUp = async ($: $) => {
     await $.command.run({ command: 'compact', args: instructions })
   } catch (failed) {
     const reason = failed instanceof Error ? failed.message : String(failed)
-    $.ui.toast(`Couldn't tidy up the chat (${reason.slice(0, 80)}). Type /compact to try again.`)
+    $.ui.toast(tr("Couldn't tidy up the chat ({0}). Type /compact to try again.", reason.slice(0, 80)))
   }
 }
 
@@ -1089,8 +1117,10 @@ const holdSecretMessage = async ($: $, text: string, kinds: string[]) => {
   // Put it back in the box so nothing is lost.
   $.clock.after(50, () => void $.prompt.fill({ text }).catch(() => undefined))
   $.ui.toast(
-    `This message looks like it has ${kinds.join(' and ')} in it, so it was not sent. ` +
-      'Press Enter again to send it anyway, or take it out first.',
+    tr(
+      'This message looks like it has {0} in it, so it was not sent. Press Enter again to send it anyway, or take it out first.',
+      kinds.map(kind => tr(kind)).reduce((all, kind) => tr('{0} and {1}', all, kind)),
+    ),
   )
 }
 
@@ -1099,11 +1129,11 @@ const measureUsage = async ($: $, usage: GlanceUsage) => {
   const level = usage.limitPercent === null ? 0 : usage.limitPercent >= LIMIT_ALERT ? 2 : usage.limitPercent >= LIMIT_WARN ? 1 : 0
   if (level > limitLevel && usage.limitPercent !== null) {
     const reset = resetTime(usage.limitResetsAt, await now($))
-    const words = `You've used ${Math.round(usage.limitPercent)}% of your ${usage.limitLabel ?? ''} limit`.replace('  ', ' ')
-    const message = reset === null ? words : `${words}. It resets ${reset}.`
+    const words = tr("You've used {0}% of your {1} limit", Math.round(usage.limitPercent), tr(usage.limitLabel ?? 'plan'))
+    const message = reset === null ? words : tr('{0}. It resets {1}.', words, reset)
     $.ui.toast(message)
     if ((await read($, noticeAtom)) && (await read($, enabledAtom))) {
-      await showNotice($, 'Plan limit', message)
+      await showNotice($, tr('Plan limit'), message)
     }
   }
   limitLevel = level
@@ -1112,7 +1142,7 @@ const measureUsage = async ($: $, usage: GlanceUsage) => {
 const setEnabled = async ($: $, isEnabled: boolean) => {
   await update($, enabledAtom, () => isEnabled)
   await $.store.set(STORE_KEY, isEnabled)
-  $.ui.toast(isEnabled ? 'GlanceFlow is on: tool details are hidden' : 'GlanceFlow is off: showing everything')
+  $.ui.toast(isEnabled ? tr('GlanceFlow is on: tool details are hidden') : tr('GlanceFlow is off: showing everything'))
 }
 
 /** Sounds: off, a chime, or a chime and a few words. A chime plays at once so the person hears what they picked. */
@@ -1120,6 +1150,13 @@ const setSound = async ($: $, mode: 'off' | 'chime' | 'voice') => {
   await update($, soundAtom, () => mode)
   await $.store.set(SOUND_KEY, mode)
   if (mode !== 'off') void playSound($, 'sounds/needs-you.wav').catch(() => undefined)
+}
+
+/** Picks GlanceFlow's language: its own words, and the words it asks Claude to put on the checklist. */
+const setLanguage = async ($: $, next: Lang) => {
+  setLang(next)
+  await update($, languageAtom, () => next)
+  await $.store.set(LANGUAGE_KEY, next)
 }
 
 /** Calm mode: nothing moves, statuses in bold; the band redraws only to keep times current. */
@@ -1132,15 +1169,15 @@ const setCalm = async ($: $, isOn: boolean) => {
 
 /** Moves the welcome on a card, or ends it for good. */
 const stepTour = async ($: $, step: number | null) => {
-  await update($, tourAtom, () => (step === null || step >= TOUR.length ? null : step))
-  if (step === null || step >= TOUR.length) await $.store.set(TOUR_KEY, true)
+  await update($, tourAtom, () => (step === null || step >= TOUR_CARDS ? null : step))
+  if (step === null || step >= TOUR_CARDS) await $.store.set(TOUR_KEY, true)
 }
 
 /** Desktop notices: on shows one when Claude needs you, gets stuck or finishes a long job. A sample shows at once. */
 const setNotice = async ($: $, isOn: boolean) => {
   await update($, noticeAtom, () => isOn)
   await $.store.set(NOTICE_KEY, isOn)
-  if (isOn) void showNotice($, 'Claude needs you', 'This is how GlanceFlow will tell you.')
+  if (isOn) void showNotice($, tr('Claude needs you'), tr('This is how GlanceFlow will tell you.'))
 }
 
 /** The line naming the other chats that need the person: off before sharing the screen, say. */
@@ -1169,7 +1206,7 @@ const shipIt = ($: $) => {
   isShipTurnNext = true
   return sendAsUser($, SHIP_PROMPT, async () => {
     await $.prompt.fill({ text: SHIP_PROMPT })
-    $.ui.toast('The ship-it steps are in the prompt box: press Enter to send them.')
+    $.ui.toast(tr('The ship-it steps are in the prompt box: press Enter to send them.'))
   })
 }
 
@@ -1191,8 +1228,8 @@ const holdForApproval = async ($: $): Promise<boolean> => {
 }
 
 /** The person approves the plan: the same job starts. */
-const startPlan = ($: $) => sendAsUser($, START_TEXT, () => $.ui.toast("Couldn't start right now. Type: start"))
-const aimHigher = ($: $) => sendAsUser($, AIM_TEXT, () => $.ui.toast("Couldn't send that right now. Ask Claude for a deeper plan."))
+const startPlan = ($: $) => sendAsUser($, START_TEXT, () => $.ui.toast(tr("Couldn't start right now. Type: start")))
+const aimHigher = ($: $) => sendAsUser($, AIM_TEXT, () => $.ui.toast(tr("Couldn't send that right now. Ask Claude for a deeper plan.")))
 
 /** Picks Simple, Details or Off directly, as the settings panel does. */
 const setView = async ($: $, view: 'simple' | 'detailed' | 'off') => {
@@ -1208,7 +1245,7 @@ const setView = async ($: $, view: 'simple' | 'detailed' | 'off') => {
 const alertSample = async ($: $, mode: 'off' | 'chime' | 'voice') => {
   if (mode === 'off') return
   await playSound($, 'sounds/needs-you.wav').catch(() => undefined)
-  if (mode === 'voice') await sayWords($, 'Claude needs you').catch(() => undefined)
+  if (mode === 'voice') await sayWords($, tr('Claude needs you')).catch(() => undefined)
 }
 
 /** Back to how GlanceFlow starts: Simple, no sounds or notices, calm off, password guard on, no plan approval, tidy up at 50%. */
@@ -1222,10 +1259,10 @@ const resetSettings = async ($: $) => {
   await setApprove($, false)
   await setShipOnGithub($, false)
   await setTidyAt($, TIDY_AT_DEFAULT)
-  $.ui.toast('Settings are back to their defaults.')
+  $.ui.toast(tr('Settings are back to their defaults.'))
 }
 
-const showSettings = ($: $) => $.ui.open({ id: SETTINGS_PANE, title: 'GlanceFlow settings', closeOnEscape: true })
+const showSettings = ($: $) => $.ui.open({ id: SETTINGS_PANE, title: tr('GlanceFlow settings'), closeOnEscape: true })
 const openChecklist = ($: $) => $.ui.open({ id: CHECKLIST_PANE, title: 'GlanceFlow' })
 
 // This copy's version, from its own plugin.json, read once; null when it can't be read.
@@ -1295,7 +1332,7 @@ const installUpdate = async ($: $) => {
     const { exitCode } = await $.process.run(['claude', 'plugin', 'update', found.id], { timeoutMs: 120_000 })
     if (exitCode !== 0) throw new Error('update failed')
     await setUpdate($, { ...found, state: 'updated' })
-    $.ui.toast(`GlanceFlow ${found.latest} is installed. Open a new chat to use it.`)
+    $.ui.toast(tr('GlanceFlow {0} is installed. Open a new chat to use it.', found.latest ?? ''))
   } catch {
     await setUpdate($, { ...found, state: 'failed' })
   }
@@ -1311,10 +1348,10 @@ const cycleMode = async ($: $, isEnabled: boolean, isDetailed: boolean) => {
   await $.store.set(DETAIL_KEY, nextDetailed ? 'detailed' : 'simple')
   $.ui.toast(
     !nextEnabled
-      ? 'GlanceFlow is off: showing everything'
+      ? tr('GlanceFlow is off: showing everything')
       : nextDetailed
-        ? 'GlanceFlow details: models, time, tokens, cache and plan usage'
-        : 'GlanceFlow simple: just the steps and progress',
+        ? tr('GlanceFlow details: models, time, tokens, cache and plan usage')
+        : tr('GlanceFlow simple: just the steps and progress'),
   )
 }
 
@@ -1322,7 +1359,7 @@ const setDetail = async ($: $, isDetailed: boolean) => {
   await update($, detailAtom, () => (isDetailed ? 'detailed' : 'simple'))
   await $.store.set(DETAIL_KEY, isDetailed ? 'detailed' : 'simple')
   $.ui.toast(
-    isDetailed ? 'Details on: models, tokens, cache and plan usage' : 'Details off: just the steps and progress',
+    isDetailed ? tr('Details on: models, tokens, cache and plan usage') : tr('Details off: just the steps and progress'),
   )
 }
 
@@ -1336,7 +1373,7 @@ const adoptGlanceStore = async ($: $) => {
   try {
     const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('HOME')}/.claude`
     const dir = `${config}/plugins/store`
-    const settings = new Set([STORE_KEY, DETAIL_KEY, SOUND_KEY, CALM_KEY, GUARD_KEY, APPROVE_KEY, NOTICE_KEY])
+    const settings = new Set([STORE_KEY, DETAIL_KEY, SOUND_KEY, CALM_KEY, GUARD_KEY, APPROVE_KEY, NOTICE_KEY, LANGUAGE_KEY])
     const mine = new Set(await $.store.keys())
     for (const file of await $.fs.list(dir)) {
       if (!/^glance_.*\.json$/.test(file.name)) {
@@ -1418,6 +1455,9 @@ export function registerGlance(on: On): void {
     const sound = await $.store.get(SOUND_KEY)
     await update($, soundAtom, () => (sound === 'chime' || sound === 'voice' ? sound : 'off'))
     isCalmMode = (await $.store.get(CALM_KEY)) === true
+    const language: Lang = (await $.store.get(LANGUAGE_KEY)) === 'el' ? 'el' : 'en'
+    setLang(language)
+    await update($, languageAtom, () => language)
     const isGuarded = (await $.store.get(GUARD_KEY)) !== false
     await update($, guardAtom, () => isGuarded)
     const approves = (await $.store.get(APPROVE_KEY)) === true
@@ -1513,7 +1553,7 @@ export function registerGlance(on: On): void {
     await $.command.register({
       name: 'glanceflow',
       description:
-        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, show, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
+        'GlanceFlow: /glanceflow on|off, details on|off, sound on|voice|off, notify on|off, others on|off, calm on|off, language el|en, guard on|off, approve on|off, ship on|off, goal [text|off], week, tour, pause, continue, plan, show, checkpoint, settings, tidy [at N|off], history [yesterday|YYYY-MM-DD], handoff',
     })
     // A reload drops the module's timers; pick the animation back up.
     syncTicker($, await read($, checklistAtom))
@@ -1533,16 +1573,23 @@ export function registerGlance(on: On): void {
       return {
         text:
           mode === 'off'
-            ? 'Sounds are off.'
+            ? tr('Sounds are off.')
             : mode === 'voice'
-              ? 'Sounds and voice are on: you will hear when Claude needs you, gets stuck or finishes a long job.'
-              : 'Sounds are on: a chime when Claude needs you, gets stuck or finishes a long job.',
+              ? tr('Sounds and voice are on: you will hear when Claude needs you, gets stuck or finishes a long job.')
+              : tr('Sounds are on: a chime when Claude needs you, gets stuck or finishes a long job.'),
       }
+    }
+    if (arg.startsWith('language')) {
+      const choice = arg.slice('language'.length).trim()
+      const next: Lang | null = /^(el|greek|ελληνικά)$/.test(choice) ? 'el' : /^(en|english)$/.test(choice) ? 'en' : null
+      if (next === null) return { text: tr('Try /glanceflow language el or /glanceflow language en.') }
+      await setLanguage($, next)
+      return { text: tr('GlanceFlow speaks English now.') }
     }
     if (arg.startsWith('calm')) {
       const choice = arg.slice('calm'.length).trim()
       await setCalm($, toggled(choice, await read($, calmAtom)))
-      return { text: isCalmMode ? 'Calm mode is on: nothing moves, statuses are bold.' : 'Calm mode is off.' }
+      return { text: isCalmMode ? tr('Calm mode is on: nothing moves, statuses are bold.') : tr('Calm mode is off.') }
     }
     if (arg.startsWith('guard')) {
       const choice = arg.slice('guard'.length).trim()
@@ -1550,18 +1597,18 @@ export function registerGlance(on: On): void {
       await setGuard($, isOn)
       return {
         text: isOn
-          ? 'The password guard is on: a message that looks like it has a password or key in it is held back.'
-          : 'The password guard is off: every message is sent as you write it.',
+          ? tr('The password guard is on: a message that looks like it has a password or key in it is held back.')
+          : tr('The password guard is off: every message is sent as you write it.'),
       }
     }
     if (arg === 'show') {
       const opened = await openChecklist($)
-      return { text: opened.isPlaced ? 'The GlanceFlow checklist is open.' : `Couldn't open the checklist: ${opened.reason}.` }
+      return { text: opened.isPlaced ? tr('The GlanceFlow checklist is open.') : tr("Couldn't open the checklist: {0}.", opened.reason) }
     }
     if (arg === 'tour') {
       await update($, enabledAtom, () => true)
       await update($, tourAtom, () => 0)
-      return { text: 'The welcome shows above the prompt: press Next to go through it.' }
+      return { text: tr('The welcome shows above the prompt: press Next to go through it.') }
     }
     if (arg.startsWith('notify')) {
       const choice = arg.slice('notify'.length).trim()
@@ -1569,14 +1616,14 @@ export function registerGlance(on: On): void {
       await setNotice($, isOn)
       return {
         text: isOn
-          ? 'Desktop notices are on: your computer, and any Notification hooks you set up for Claude Code, tell you when Claude needs you, gets stuck or finishes a long job.'
-          : 'Desktop notices are off.',
+          ? tr('Desktop notices are on: your computer, and any Notification hooks you set up for Claude Code, tell you when Claude needs you, gets stuck or finishes a long job.')
+          : tr('Desktop notices are off.'),
       }
     }
     if (arg.startsWith('others')) {
       const isOn = toggled(arg.slice('others'.length).trim(), await read($, showsOthersAtom))
       await setOthers($, isOn)
-      return { text: isOn ? 'The band names another chat on this computer that needs you.' : 'The band no longer mentions other chats.' }
+      return { text: isOn ? tr('The band names another chat on this computer that needs you.') : tr('The band no longer mentions other chats.') }
     }
     if (arg.startsWith('approve')) {
       const choice = arg.slice('approve'.length).trim()
@@ -1584,28 +1631,28 @@ export function registerGlance(on: On): void {
       await setApprove($, isOn)
       return {
         text: isOn
-          ? 'Claude now shows its plan and waits: press Start, or tell Claude what to change.'
-          : 'Claude starts right after laying out its plan.',
+          ? tr('Claude now shows its plan and waits: press Start, or tell Claude what to change.')
+          : tr('Claude starts right after laying out its plan.'),
       }
     }
     if (arg.startsWith('ship')) {
       const choice = arg.slice('ship'.length).trim()
       if (choice === '') {
         void shipIt($)
-        return { text: 'Shipping on GitHub…' }
+        return { text: tr('Shipping on GitHub…') }
       }
       const isOn = toggled(choice, await read($, shipOnGithubAtom))
       await setShipOnGithub($, isOn)
       return {
         text: isOn
-          ? 'A finished job now offers Ship it: commit, pull request, and merge once you approve.'
-          : 'Ship it is off. Finished jobs stay on their branch.',
+          ? tr('A finished job now offers Ship it: commit, pull request, and merge once you approve.')
+          : tr('Ship it is off. Finished jobs stay on their branch.'),
       }
     }
     if (arg === 'week') {
       const opened = await showHistory($, dayKey(await now($)), true)
       const view = await read($, historyAtom)
-      if (view === null) return { text: 'No history yet.' }
+      if (view === null) return { text: tr('No history yet.') }
       await showReportSpan($, 'mine')
       const summary = weekSummary(view.myWeekEntries, view.day).split('\n')
 
@@ -1614,61 +1661,61 @@ export function registerGlance(on: On): void {
     if (arg.startsWith('history')) {
       const day = dayFromArgument(arg.slice('history'.length), await now($))
       if (day === null) {
-        return { text: 'Try /glanceflow history, /glanceflow history yesterday or /glanceflow history 2026-10-06.' }
+        return { text: tr('Try /glanceflow history, /glanceflow history yesterday or /glanceflow history 2026-10-06.') }
       }
       const opened = await showHistory($, day, true)
       const entries = (await read($, historyAtom))?.entries ?? []
-      const count = `${entries.length} ${entries.length === 1 ? 'task' : 'tasks'}`
+      const count = entries.length === 1 ? tr('1 task') : tr('{0} tasks', entries.length)
 
       return {
         text: opened?.isPlaced
-          ? `History for ${day}: ${count}.`
-          : `History for ${day}: ${count}. Widen the window to see the panel.`,
+          ? tr('History for {0}: {1}.', day, count)
+          : tr('History for {0}: {1}. Widen the window to see the panel.', day, count),
       }
     }
     if (arg === 'pause') {
       await pauseJob($)
-      return { text: 'Paused.' }
+      return { text: tr('Paused.') }
     }
     if (arg.startsWith('tidy')) {
       const choice = arg.slice('tidy'.length).trim().replace(/^at\s+/, '').replace('%', '')
       if (choice === '') {
         void tidyUp($)
-        return { text: 'Saving a checkpoint, then tidying up the chat.' }
+        return { text: tr('Saving a checkpoint, then tidying up the chat.') }
       }
       const percent = choice === 'off' ? 0 : Number(choice)
       if (!Number.isInteger(percent) || percent < 0 || percent > 95) {
-        return { text: 'Try /glanceflow tidy, /glanceflow tidy at 50 or /glanceflow tidy off.' }
+        return { text: tr('Try /glanceflow tidy, /glanceflow tidy at 50 or /glanceflow tidy off.') }
       }
       await setTidyAt($, percent)
-      return { text: percent === 0 ? 'GlanceFlow will not offer to tidy up.' : `GlanceFlow offers to tidy up at ${percent}% full.` }
+      return { text: percent === 0 ? tr('GlanceFlow will not offer to tidy up.') : tr('GlanceFlow offers to tidy up at {0}% full.', percent) }
     }
     if (arg === 'settings') {
       await showSettings($)
-      return { text: 'Settings are in the side panel.' }
+      return { text: tr('Settings are in the side panel.') }
     }
     if (arg === 'checkpoint') {
-      if ((await checkpointOf($).catch(() => null)) === null) return { text: 'No checkpoint in this chat yet. Tidy it up saves one.' }
+      if ((await checkpointOf($).catch(() => null)) === null) return { text: tr('No checkpoint in this chat yet. Tidy it up saves one.') }
       await showRecap($)
-      return { text: 'Where we left off is in the side panel.' }
+      return { text: tr('Where we left off is in the side panel.') }
     }
     if (arg === 'plan') {
       await showPlan($)
-      return { text: 'The plan is in the side panel.' }
+      return { text: tr('The plan is in the side panel.') }
     }
     if (arg === 'continue') {
       void continueJob($)
-      return { text: 'Continuing…' }
+      return { text: tr('Continuing…') }
     }
     if (arg === 'handoff note') {
       const saved = (await $.store.get(HANDOFF_KEY)) as { note?: string } | undefined
-      if (!saved?.note) return { text: 'No handoff note saved yet.' }
+      if (!saved?.note) return { text: tr('No handoff note saved yet.') }
       await $.prompt.fill({ text: saved.note })
-      return { text: 'The last handoff note is in the prompt box.' }
+      return { text: tr('The last handoff note is in the prompt box.') }
     }
     if (arg === 'handoff') {
       void startFreshChat($)
-      return { text: 'Starting a fresh chat from a handoff note…' }
+      return { text: tr('Starting a fresh chat from a handoff note…') }
     }
     if (arg.startsWith('goal')) {
       // arg is lowercased: the goal keeps the person's own spelling.
@@ -1676,31 +1723,31 @@ export function registerGlance(on: On): void {
       const key = `${GOAL_PREFIX}${await $.session.cwd()}`
       if (text.toLowerCase() === 'off') {
         await $.store.delete(key)
-        return { text: 'The goal for this project is cleared.' }
+        return { text: tr('The goal for this project is cleared.') }
       }
       const goal = text ? cleanName(text, MAX_GOAL) : ''
       if (!goal) {
         const current = await readGoal($)
         return {
           text: current
-            ? `The goal for this project: ${current}. Claude plans each job toward it. Clear it with /glanceflow goal off.`
-            : 'No goal for this project yet. Set one with /glanceflow goal and what you want, like: keep sign-ups working.',
+            ? tr('The goal for this project: {0}. Claude plans each job toward it. Clear it with /glanceflow goal off.', current)
+            : tr('No goal for this project yet. Set one with /glanceflow goal and what you want, like: keep sign-ups working.'),
         }
       }
       await $.store.set(key, goal)
-      return { text: `The goal for this project: ${goal}. Claude plans each new job toward it.` }
+      return { text: tr('The goal for this project: {0}. Claude plans each new job toward it.', goal) }
     }
     if (arg.startsWith('details')) {
       const choice = arg.slice('details'.length).trim()
       const isDetailed = toggled(choice, (await read($, detailAtom)) === 'detailed')
       await setDetail($, isDetailed)
 
-      return { text: isDetailed ? 'GlanceFlow details are on.' : 'GlanceFlow details are off.' }
+      return { text: isDetailed ? tr('GlanceFlow details are on.') : tr('GlanceFlow details are off.') }
     }
     const isEnabled = toggled(arg, await read($, enabledAtom))
     await setEnabled($, isEnabled)
 
-    return { text: isEnabled ? 'GlanceFlow is on.' : 'GlanceFlow is off.' }
+    return { text: isEnabled ? tr('GlanceFlow is on.') : tr('GlanceFlow is off.') }
   })
 
   on('prompt.compose', async ($, e, next) => {
@@ -1716,6 +1763,8 @@ export function registerGlance(on: On): void {
       sections: [
         ...composed.sections,
         { id: `${PLUGIN}:checklist`, text: PROMPT_SECTION, scope: 'session' as const },
+        // The person reads GlanceFlow in Greek: what Claude writes on the checklist is Greek too.
+        ...(currentLang() === 'el' ? [{ id: `${PLUGIN}:language`, text: GREEK_SECTION, scope: 'session' as const }] : []),
         // The outcome beyond the task, across jobs: each plan aims at it.
         ...(goal === null
           ? []
@@ -1750,7 +1799,7 @@ export function registerGlance(on: On): void {
     }
     await holdSecretMessage($, e.text, kinds)
 
-    return { drop: 'The message looked like it held a password or key, so GlanceFlow held it back.' }
+    return { drop: tr('The message looked like it held a password or key, so GlanceFlow held it back.') }
   })
 
   on('session.measure', async ($, e, next) => {
@@ -1787,7 +1836,7 @@ export function registerGlance(on: On): void {
     const mark = (glyph: string) => (e.surface === 'terminal' ? `${glyph} ` : '')
     if (list !== null && list.phase === 'background') {
       const running = list.helpers.filter(one => one.status === 'running').length
-      return next({ ...e, props: { ...e.props, modes: [`${mark('◷')}${running} in background`, ...e.props.modes] } })
+      return next({ ...e, props: { ...e.props, modes: [`${mark('◷')}${tr('{0} in background', running)}`, ...e.props.modes] } })
     }
     if (list === null || !list.hasPlan || list.phase === 'done' || list.phase === 'stopped') {
       return next(e)
@@ -1954,7 +2003,7 @@ export function registerGlance(on: On): void {
         activity: null,
         approval: list?.approval ?? 'none',
         costAtStart: list?.costAtStart ?? null,
-        title: list?.title ?? 'Working on it',
+        title: list?.title ?? tr('Working on it'),
         startedAt: list?.startedAt ?? started,
         jobId: list?.jobId ?? call.tool_use_id,
         finishedAt: null,
@@ -2248,10 +2297,10 @@ export function registerGlance(on: On): void {
         await change($, current => ({
           ...current,
           // A quick answer needed no plan: one plain step instead of the placeholders.
-          tasks: current.hasPlan ? current.tasks : carryTokens(current.tasks, [task('Answer your question', 'done')]),
+          tasks: current.hasPlan ? current.tasks : carryTokens(current.tasks, [task(tr('Answer your question'), 'done')]),
         }))
         // A finished job whose last message asks something, or asks to approve a merge, still waits for the person.
-        const asked = askedSha !== null ? `Reply exactly: Approve merge ${askedSha}` : questionOf(e.answer ?? '')
+        const asked = askedSha !== null ? tr('Reply exactly: Approve merge {0}', askedSha) : questionOf(e.answer ?? '')
         const isAsking = askedSha !== null || asksQuestion(e.answer ?? '')
         await change($, current => ({
           ...current,
@@ -2298,6 +2347,7 @@ export function registerGlance(on: On): void {
     const view = !isEnabled ? 'off' : await read($, detailAtom)
     const sound = await read($, soundAtom)
     const isCalm = await read($, calmAtom)
+    const language = await read($, languageAtom)
     const isNoticing = await read($, noticeAtom)
     const showsOthers = await read($, showsOthersAtom)
     const isGuarded = await read($, guardAtom)
@@ -2346,7 +2396,7 @@ export function registerGlance(on: On): void {
         // A settings row as the Mac draws one: the name on the left, its menu on the right, what it does below.
         // Its mark says Setting: the name follows in bold, so a screen reader hears it once.
         <Box key={key} flexDirection="row" gap={1} marginTop={2} width={columns}>
-          {kit.icon(icon, 'quiet', 'Setting')}
+          {kit.icon(icon, 'quiet', tr('Setting'))}
           <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} gap={Select ? 0 : 1}>
             <Box flexDirection={Select ? 'row' : 'column'} alignItems={Select ? 'center' : undefined} justifyContent="space-between" columnGap={2} rowGap={1}>
               <Text bold>{title}</Text>
@@ -2375,50 +2425,51 @@ export function registerGlance(on: On): void {
       )
 
     const viewHelp = {
-      simple: 'The steps and progress in plain words, with tool details out of the way. For everyone.',
-      detailed: 'Also time, models and tokens per step, with the code in view. For engineers.',
-      off: 'Claude Code as usual: no checklist, every tool row shown. The password guard keeps its own setting.',
+      simple: tr('The steps and progress in plain words, with tool details out of the way. For everyone.'),
+      detailed: tr('Also time, models and tokens per step, with the code in view. For engineers.'),
+      off: tr('Claude Code as usual: no checklist, every tool row shown. The password guard keeps its own setting.'),
     }[view]
     const soundHelp = {
-      off: 'No sounds. Turn them on to look away while Claude works.',
-      chime: 'A short chime when Claude needs you, gets stuck, or finishes a job that took over a minute.',
-      voice: 'The chime, and a few words like "Claude needs you".',
+      off: tr('No sounds. Turn them on to look away while Claude works.'),
+      chime: tr('A short chime when Claude needs you, gets stuck, or finishes a job that took over a minute.'),
+      voice: tr('The chime, and a few words like "Claude needs you".'),
     }[sound]
     const chatFull = usage.contextPercent === null ? null : Math.round(usage.contextPercent)
     const updateCommand = `claude plugin update ${found.id ?? `${PLUGIN}@claude-mods`}`
+    const latest = found.latest ?? ''
     const updateHelp = {
-      idle: 'Checking fetches the newest GlanceFlow from the marketplace you installed it from.',
-      checking: 'Checking for a newer version…',
-      latest: 'You have the newest version.',
-      available: `GlanceFlow ${found.latest} is out. Update installs it; a new chat then uses it.`,
-      updating: `Installing GlanceFlow ${found.latest}…`,
-      updated: `GlanceFlow ${found.latest} is installed. Open a new chat to use it.`,
-      folder: 'This copy runs from a folder, not a marketplace, so it updates where it lives (with git pull, say).',
-      failed: `Couldn't check or update from here. In a terminal, run: ${updateCommand}`,
+      idle: tr('Checking fetches the newest GlanceFlow from the marketplace you installed it from.'),
+      checking: tr('Checking for a newer version…'),
+      latest: tr('You have the newest version.'),
+      available: tr('GlanceFlow {0} is out. Update installs it; a new chat then uses it.', latest),
+      updating: tr('Installing GlanceFlow {0}…', latest),
+      updated: tr('GlanceFlow {0} is installed. Open a new chat to use it.', latest),
+      folder: tr('This copy runs from a folder, not a marketplace, so it updates where it lives (with git pull, say).'),
+      failed: tr("Couldn't check or update from here. In a terminal, run: {0}", updateCommand),
     }[found.state]
     const updateButton =
       found.state === 'available' ? (
-        <Button key="update" label={`Update to ${found.latest}`} variant="primary" onPress={() => installUpdate($)} />
+        <Button key="update" label={tr('Update to {0}', latest)} variant="primary" onPress={() => installUpdate($)} />
       ) : found.state === 'idle' || found.state === 'latest' || found.state === 'failed' ? (
-        <Button key="update" label={found.state === 'idle' ? 'Check for updates' : 'Check again'} onPress={() => checkForUpdate($)} />
+        <Button key="update" label={found.state === 'idle' ? tr('Check for updates') : tr('Check again')} onPress={() => checkForUpdate($)} />
       ) : null
     const tidyHelp =
       tidyAt === 0
-        ? 'GlanceFlow never offers to tidy up. Claude Code still compacts on its own when the chat is full.'
-        : `At ${tidyAt}% full, the checklist offers to tidy up. Claude first saves a checkpoint of the work (goal, what is done and left, decisions, the next step), so nothing important is lost when the chat is compacted.`
+        ? tr('GlanceFlow never offers to tidy up. Claude Code still compacts on its own when the chat is full.')
+        : tr('At {0}% full, the checklist offers to tidy up. Claude first saves a checkpoint of the work (goal, what is done and left, decisions, the next step), so nothing important is lost when the chat is compacted.', tidyAt)
 
     return (
       <Box flexDirection="column" width={columns}>
         {vector ? (
           // The app titles the panel; the body starts with how changes behave.
           <Text dimColor wrap="wrap">
-            Changes apply right away and stay for your next chats.
+            {tr('Changes apply right away and stay for your next chats.')}
           </Text>
         ) : (
           <Box flexDirection="column">
-            <Text bold>⚙ GlanceFlow settings</Text>
+            <Text bold>{`⚙ ${tr('GlanceFlow settings')}`}</Text>
             <Text dimColor wrap="wrap">
-              Changes apply right away and stay for your next chats.
+              {tr('Changes apply right away and stay for your next chats.')}
             </Text>
             <Text dimColor>{rule}</Text>
           </Box>
@@ -2426,90 +2477,98 @@ export function registerGlance(on: On): void {
         {group(
           'view',
           'eye',
-          'View',
-          view === 'simple' ? 'Simple' : view === 'detailed' ? (vector ? 'Detailed' : 'Details') : 'Off',
-          choice('view', vector ? [['detailed', 'Detailed'], ['simple', 'Simple'], ['off', 'Off']] : [['simple', 'Simple'], ['detailed', 'Details'], ['off', 'Off']], view, value => setView($, value)),
+          tr('View'),
+          view === 'simple' ? tr('Simple') : view === 'detailed' ? (vector ? tr('Detailed') : tr('Details')) : tr('Off'),
+          choice('view', vector ? [['detailed', tr('Detailed')], ['simple', tr('Simple')], ['off', tr('Off')]] : [['simple', tr('Simple')], ['detailed', tr('Details')], ['off', tr('Off')]], view, value => setView($, value)),
           viewHelp,
         )}
         {group(
           'sound',
           'sound',
-          'Sounds',
-          sound === 'off' ? 'Off' : sound === 'chime' ? 'Chime' : 'Chime and voice',
-          choice('sound', [['off', 'Off'], ['chime', 'Chime'], ['voice', 'Chime and voice']], sound, value => setSound($, value)),
+          tr('Sounds'),
+          sound === 'off' ? tr('Off') : sound === 'chime' ? tr('Chime') : tr('Chime and voice'),
+          choice('sound', [['off', tr('Off')], ['chime', tr('Chime')], ['voice', tr('Chime and voice')]], sound, value => setSound($, value)),
           soundHelp,
           sound === 'off' ? undefined : (
             <Box key="sound-test" marginTop={vector ? 1 : 0}>
-              <Button key="sound-test" label={vector ? 'Play it' : '▶ Play it'} onPress={() => alertSample($, sound)} />
+              <Button key="sound-test" label={vector ? tr('Play it') : `▶ ${tr('Play it')}`} onPress={() => alertSample($, sound)} />
             </Box>
           ),
         )}
         {group(
           'notice',
           'bell',
-          'Desktop notices',
-          isNoticing ? 'On' : 'Off',
-          choice('notice', [['off', 'Off'], ['on', 'On']], isNoticing ? 'on' : 'off', value => setNotice($, value === 'on')),
+          tr('Desktop notices'),
+          isNoticing ? tr('On') : tr('Off'),
+          choice('notice', [['off', tr('Off')], ['on', tr('On')]], isNoticing ? 'on' : 'off', value => setNotice($, value === 'on')),
           isNoticing
-            ? 'A notice when Claude needs you, gets stuck, or finishes a job that took over a minute: on your computer, and through your Claude Code Notification hooks, such as one that reaches your phone.'
-            : 'Turn on to get a notice on your computer, even while you work in another app, or on your phone through your Claude Code Notification hooks.',
+            ? tr('A notice when Claude needs you, gets stuck, or finishes a job that took over a minute: on your computer, and through your Claude Code Notification hooks, such as one that reaches your phone.')
+            : tr('Turn on to get a notice on your computer, even while you work in another app, or on your phone through your Claude Code Notification hooks.'),
         )}
         {group(
           'others',
           'eye',
-          'Other chats',
-          showsOthers ? 'On' : 'Off',
-          choice('others', [['off', 'Off'], ['on', 'On']], showsOthers ? 'on' : 'off', value => setOthers($, value === 'on')),
+          tr('Other chats'),
+          showsOthers ? tr('On') : tr('Off'),
+          choice('others', [['off', tr('Off')], ['on', tr('On')]], showsOthers ? 'on' : 'off', value => setOthers($, value === 'on')),
           showsOthers
-            ? 'The band names another chat on this computer that needs you, from any project. Turn off before you share your screen.'
-            : 'Turn on to see when another chat on this computer needs you.',
+            ? tr('The band names another chat on this computer that needs you, from any project. Turn off before you share your screen.')
+            : tr('Turn on to see when another chat on this computer needs you.'),
+        )}
+        {group(
+          'language',
+          'globe',
+          tr('Language'),
+          language === 'el' ? 'Ελληνικά' : 'English',
+          choice('language', [['en', 'English'], ['el', 'Ελληνικά']], language, value => setLanguage($, value as Lang)),
+          tr("GlanceFlow's own words, and the steps Claude writes on the checklist."),
         )}
         {group(
           'calm',
           'moon',
-          'Calm mode',
-          isCalm ? 'On' : 'Off',
-          choice('calm', [['off', 'Off'], ['on', 'On']], isCalm ? 'on' : 'off', value => setCalm($, value === 'on')),
-          isCalm ? 'Nothing on screen moves, and statuses read in bold.' : 'Bars and spinners move while Claude works. Turn on for a still screen.',
+          tr('Calm mode'),
+          isCalm ? tr('On') : tr('Off'),
+          choice('calm', [['off', tr('Off')], ['on', tr('On')]], isCalm ? 'on' : 'off', value => setCalm($, value === 'on')),
+          isCalm ? tr('Nothing on screen moves, and statuses read in bold.') : tr('Bars and spinners move while Claude works. Turn on for a still screen.'),
         )}
         {group(
           'approve',
           'approve',
-          'Approve the plan first',
-          approves ? 'On' : 'Off',
-          choice('approve', [['off', 'Off'], ['on', 'On']], approves ? 'on' : 'off', value => setApprove($, value === 'on')),
+          tr('Approve the plan first'),
+          approves ? tr('On') : tr('Off'),
+          choice('approve', [['off', tr('Off')], ['on', tr('On')]], approves ? 'on' : 'off', value => setApprove($, value === 'on')),
           approves
-            ? `Claude shows its plan and waits. Press ${vector ? 'Start' : '▶ Start'}, or tell Claude what to change.`
-            : 'Claude starts right after laying out its plan.',
+            ? tr('Claude shows its plan and waits. Press {0}, or tell Claude what to change.', vector ? tr('Start') : `▶ ${tr('Start')}`)
+            : tr('Claude starts right after laying out its plan.'),
         )}
         {group(
           'ship',
           'ship',
-          'Finish on GitHub',
-          ships ? 'On' : 'Off',
-          choice('ship', [['off', 'Off'], ['on', 'On']], ships ? 'on' : 'off', value => setShipOnGithub($, value === 'on')),
+          tr('Finish on GitHub'),
+          ships ? tr('On') : tr('Off'),
+          choice('ship', [['off', tr('Off')], ['on', tr('On')]], ships ? 'on' : 'off', value => setShipOnGithub($, value === 'on')),
           ships
-            ? 'A finished job offers Ship it: Claude tidies the changes, opens a pull request and merges once you approve.'
-            : 'Finished jobs stay on their branch. Turn on for a Ship it button in GitHub projects.',
+            ? tr('A finished job offers Ship it: Claude tidies the changes, opens a pull request and merges once you approve.')
+            : tr('Finished jobs stay on their branch. Turn on for a Ship it button in GitHub projects.'),
         )}
         {group(
           'guard',
           'lock',
-          'Password guard',
-          isGuarded ? 'On' : 'Off',
-          choice('guard', [['off', 'Off'], ['on', 'On']], isGuarded ? 'on' : 'off', value => setGuard($, value === 'on')),
+          tr('Password guard'),
+          isGuarded ? tr('On') : tr('Off'),
+          choice('guard', [['off', tr('Off')], ['on', tr('On')]], isGuarded ? 'on' : 'off', value => setGuard($, value === 'on')),
           isGuarded
-            ? 'A message that looks like it has a password or key in it is held back. Press Enter again to send it anyway.'
-            : 'Every message is sent as you write it. Keys and emails are still masked on screen.',
+            ? tr('A message that looks like it has a password or key in it is held back. Press Enter again to send it anyway.')
+            : tr('Every message is sent as you write it. Keys and emails are still masked on screen.'),
         )}
         {group(
           'tidy',
           'tidy',
-          'Tidy up the chat',
-          tidyAt === 0 ? 'Never' : `At ${tidyAt}% full`,
+          tr('Tidy up the chat'),
+          tidyAt === 0 ? tr('Never') : tr('At {0}% full', tidyAt),
           choice(
             'tidy',
-            TIDY_CHOICES.map(value => [value, value === 0 ? 'Never' : `${value}%`] as [number, string]),
+            TIDY_CHOICES.map(value => [value, value === 0 ? tr('Never') : `${value}%`] as [number, string]),
             tidyAt,
             value => setTidyAt($, value),
           ),
@@ -2518,23 +2577,23 @@ export function registerGlance(on: On): void {
             {(chatFull !== null || checkpointAt !== null) && (
               <Text dimColor wrap="wrap">
                 {[
-                  chatFull === null ? '' : `This chat is ${chatFull}% full.`,
-                  checkpointAt === null ? '' : `Last checkpoint saved at ${clockTime(checkpointAt)}.`,
+                  chatFull === null ? '' : tr('This chat is {0}% full.', chatFull),
+                  checkpointAt === null ? '' : tr('Last checkpoint saved at {0}.', clockTime(checkpointAt)),
                 ]
                   .filter(Boolean)
                   .join(' ')}
               </Text>
             )}
             <Box flexDirection="row" gap={1}>
-              <Button key="tidy-now" label="Tidy up now" onPress={() => tidyUp($)} />
-              {checkpointAt !== null && <Button key="recap" label="Where we left off" onPress={() => showRecap($)} />}
+              <Button key="tidy-now" label={tr('Tidy up now')} onPress={() => tidyUp($)} />
+              {checkpointAt !== null && <Button key="recap" label={tr('Where we left off')} onPress={() => showRecap($)} />}
             </Box>
           </Box>,
         )}
         {group(
           'version',
           'spark',
-          'Version',
+          tr('Version'),
           version ?? '',
           updateButton ?? <Box key="update-none" />,
           version === null ? updateHelp : `GlanceFlow ${version}. ${updateHelp}`,
@@ -2542,8 +2601,8 @@ export function registerGlance(on: On): void {
         {!vector && <Text dimColor>{rule}</Text>}
         <Box key="actions" flexDirection="row" gap={1} marginTop={vector ? 2 : 0} justifyContent={vector ? 'flex-end' : undefined} width={vector ? columns : undefined}>
           {/* Changes apply as they are made, and the app draws the panel's close control: no Done needed there. */}
-          {!vector && <Button key="close" label="Done" variant="primary" role="dismiss" onPress={() => $.ui.close({ id: SETTINGS_PANE })} />}
-          <Button key="reset" label="Reset to defaults" onPress={() => resetSettings($)} />
+          {!vector && <Button key="close" label={tr('Done')} variant="primary" role="dismiss" onPress={() => $.ui.close({ id: SETTINGS_PANE })} />}
+          <Button key="reset" label={tr('Reset to defaults')} onPress={() => resetSettings($)} />
         </Box>
       </Box>
     )
@@ -2559,12 +2618,12 @@ export function registerGlance(on: On): void {
     const at = await read($, checkpointAtom)
     const columns = Math.max(30, e.props.bodyColumns)
     // The app draws a panel's own close control; the terminal's panel needs the button.
-    const close = vector ? null : <Button key="close" label="Close" role="dismiss" onPress={() => $.ui.close({ id: RECAP_PANE })} />
+    const close = vector ? null : <Button key="close" label={tr('Close')} role="dismiss" onPress={() => $.ui.close({ id: RECAP_PANE })} />
     // A line with the checkpoint's mark on vector surfaces; plain dim text on the terminal.
     const lead = (words: string) =>
       vector ? (
         <Box key="lead" flexDirection="row" gap={1} width={columns}>
-          {kit.icon('bookmark', 'quiet', NOTICE)}
+          {kit.icon('bookmark', 'quiet', NOTICE())}
           <Box flexShrink={1}>
             <Text dimColor wrap="wrap">
               {words}
@@ -2579,7 +2638,7 @@ export function registerGlance(on: On): void {
     if (note === null) {
       return (
         <Box flexDirection="column" width={columns}>
-          {lead('No checkpoint in this chat yet. When Claude tidies the chat up, it saves one first, and it shows here.')}
+          {lead(tr('No checkpoint in this chat yet. When Claude tidies the chat up, it saves one first, and it shows here.'))}
           {close && (
             <Box key="actions" flexDirection="row">
               {close}
@@ -2593,7 +2652,11 @@ export function registerGlance(on: On): void {
 
     return (
       <Box flexDirection="column" width={columns}>
-        {lead(`Saved${at === null ? '' : ` at ${clockTime(at)}`}, before the chat was tidied up. Claude keeps reading it for the rest of this chat.`)}
+        {lead(
+          at === null
+            ? tr('Saved before the chat was tidied up. Claude keeps reading it for the rest of this chat.')
+            : tr('Saved at {0}, before the chat was tidied up. Claude keeps reading it for the rest of this chat.', clockTime(at)),
+        )}
         <Box key="note" flexDirection="column" marginTop={1}>
           {vector ? (
             // Claude writes the checkpoint in markdown: headings and lists read as they would in a reply.
@@ -2630,17 +2693,17 @@ export function registerGlance(on: On): void {
     const actions = (
       <Box key="actions" flexDirection="row" gap={1} marginTop={vector ? 2 : 1}>
         {/* The app draws a panel's own close control; the terminal's panel needs the button. */}
-        {!vector && <Button key="close" label="Close" role="dismiss" onPress={() => $.ui.close({ id: PLAN_PANE })} />}
-        <Button key="history" label="History" onPress={async () => showHistory($, dayKey(await now($)), true)} />
+        {!vector && <Button key="close" label={tr('Close')} role="dismiss" onPress={() => $.ui.close({ id: PLAN_PANE })} />}
+        <Button key="history" label={tr('History')} onPress={async () => showHistory($, dayKey(await now($)), true)} />
       </Box>
     )
     if (list === null || !list.hasPlan) {
-      const words = 'No plan yet. Ask Claude for something and its plan shows here.'
+      const words = tr('No plan yet. Ask Claude for something and its plan shows here.')
       return (
         <Box flexDirection="column">
           {vector ? (
             <Box flexDirection="row" gap={1}>
-              {kit.icon('plan', 'quiet', NOTICE)}
+              {kit.icon('plan', 'quiet', NOTICE())}
               <Text dimColor wrap="wrap">
                 {words}
               </Text>
@@ -2661,27 +2724,27 @@ export function registerGlance(on: On): void {
     const left = list.phase === 'done' ? null : timeLeft(list, at, activePercent)
     const when =
       list.phase === 'done'
-        ? `Started ${clockTime(list.startedAt)} · finished ${clockTime(at)} · took ${(vector ? durationWords : formatDuration)(at - list.startedAt)}`
+        ? [tr('Started {0}', clockTime(list.startedAt)), tr('finished {0}', clockTime(at)), tr('took {0}', (vector ? durationWords : formatDuration)(at - list.startedAt))].join(' · ')
         : [
-            `Started ${clockTime(list.startedAt)}`,
+            tr('Started {0}', clockTime(list.startedAt)),
             // Where the band above already counts the time and what is left, the panel says when it should end.
-            vector ? '' : `${formatDuration(at - list.startedAt)} so far`,
-            left === null ? '' : vector ? `done around ${clockTime(at + left)}` : `about ${formatLeft(left)} left, done around ${clockTime(at + left)}`,
+            vector ? '' : tr('{0} so far', formatDuration(at - list.startedAt)),
+            left === null ? '' : vector ? tr('done around {0}', clockTime(at + left)) : tr('about {0} left, done around {1}', formatLeft(left), clockTime(at + left)),
           ]
             .filter(Boolean)
             .join(' · ')
-    const grew = list.plannedCount > 0 && list.tasks.length > list.plannedCount ? ` · plan grew ${list.plannedCount} → ${list.tasks.length}` : ''
+    const grew = list.plannedCount > 0 && list.tasks.length > list.plannedCount ? ` · ${tr('plan grew {0} → {1}', list.plannedCount, list.tasks.length)}` : ''
     const status =
       list.phase === 'needsYou'
-        ? { color: 'yellow', tone: 'warn' as const, icon: 'bell' as const, lead: 'Needs you', text: needsText(list) ?? WAITING }
+        ? { color: 'yellow', tone: 'warn' as const, icon: 'bell' as const, lead: 'Needs you', text: needsText(list) ?? tr(WAITING) }
         : list.phase === 'stuck'
-          ? { color: 'yellow', tone: 'alert' as const, icon: 'bang' as const, lead: 'Stuck', text: list.stuckReason ?? "Claude can't go on right now" }
+          ? { color: 'yellow', tone: 'alert' as const, icon: 'bang' as const, lead: 'Stuck', text: list.stuckReason ? tr(list.stuckReason) : tr("Claude can't go on right now") }
           : list.phase === 'stopped'
             ? list.stopKind === 'pause'
-              ? { color: undefined, tone: 'quiet' as const, icon: 'pause' as const, lead: 'Paused', text: 'press Continue to pick up' }
-              : { color: undefined, tone: 'quiet' as const, icon: 'stop' as const, lead: 'Stopped', text: 'you pressed Esc' }
+              ? { color: undefined, tone: 'quiet' as const, icon: 'pause' as const, lead: 'Paused', text: tr('press Continue to pick up') }
+              : { color: undefined, tone: 'quiet' as const, icon: 'stop' as const, lead: 'Stopped', text: tr('you pressed Esc') }
             : list.phase === 'background'
-              ? { color: 'cyan', tone: 'active' as const, icon: 'clock' as const, lead: 'Claude answered', text: 'helpers still run in the background' }
+              ? { color: 'cyan', tone: 'active' as const, icon: 'clock' as const, lead: 'Claude answered', text: tr('helpers still run in the background') }
               : null
 
     // One row per step: mark, name, then its time. On the terminal the time column lines up by cells; elsewhere the
@@ -2751,8 +2814,8 @@ export function registerGlance(on: On): void {
         .filter(helper => helper.stepId === one.id)
         .map(helper => {
           const mark = helper.status === 'running' ? '◐' : helper.status === 'failed' ? '✗' : '✓'
-          const kind = helper.kind === 'background' ? 'in the background' : helper.type === 'general-purpose' ? 'helper' : helper.type
-          const details = [kind, helper.model, isDetailed && helper.effort ? `${helper.effort} effort` : null, isDetailed && helper.tokens > 0 ? `${formatTokens(helper.tokens)} tokens` : null]
+          const kind = helper.kind === 'background' ? tr('in the background') : helper.type === 'general-purpose' ? tr('helper') : helper.type
+          const details = [kind, helper.model, isDetailed && helper.effort ? tr('{0} effort', helper.effort) : null, isDetailed && helper.tokens > 0 ? tr('{0} tokens', formatTokens(helper.tokens)) : null]
             .filter(Boolean)
             .join(' · ')
           const words = `${helper.label}${details ? ` · ${details}` : ''}`
@@ -2761,10 +2824,10 @@ export function registerGlance(on: On): void {
                 `helper-${helper.id}`,
                 words,
                 helper.status === 'running'
-                  ? kit.ring(null, isCalm ? 0 : tick, 'Running', 13)
+                  ? kit.ring(null, isCalm ? 0 : tick, tr('Running'), 13)
                   : helper.status === 'failed'
-                    ? kit.badge('close', 'alert', 'Failed', 13)
-                    : kit.badge('check', 'ok', 'Done', 13),
+                    ? kit.badge('close', 'alert', tr('Failed'), 13)
+                    : kit.badge('check', 'ok', tr('Done'), 13),
               )
             : note(`helper-${helper.id}`, `↳ ${mark} ${words}`)
           // A helper's own transcript opens in the main view; one working in the background can be stopped alone
@@ -2776,15 +2839,17 @@ export function registerGlance(on: On): void {
             <Box key={`helper-${helper.id}-row`} flexDirection="column">
               {line}
               <Box flexDirection="row" gap={1} marginLeft={vector ? 3 : 4}>
-                {canOpen && <Button key={`open-${helper.id}`} label="Open" onPress={() => openHelper($, helper.id)} />}
-                {canStop && <Button key={`stop-${helper.id}`} label="Stop" onPress={() => stopHelper($, helper)} />}
+                {canOpen && <Button key={`open-${helper.id}`} label={tr('Open')} onPress={() => openHelper($, helper.id)} />}
+                {canStop && <Button key={`stop-${helper.id}`} label={tr('Stop')} onPress={() => stopHelper($, helper)} />}
               </Box>
             </Box>
           )
         })
     const tokensOf = (one: GlanceTask) => (isDetailed ? tokenNote(one.tokens, one.cachedTokens) : '')
-    const filesOf = (key: string, one: GlanceTask, suffix = '') =>
-      one.files?.length ? [note(`${key}-files`, `${filesNote(one.files)}${suffix}`, vector ? kit.icon('file', 'quiet', 'Files', 13) : undefined)] : []
+    const filesOf = (key: string, one: GlanceTask, isSoFar = false) =>
+      one.files?.length
+        ? [note(`${key}-files`, isSoFar ? tr('{0} so far', filesNote(one.files)) : filesNote(one.files), vector ? kit.icon('file', 'quiet', tr('Files'), 13) : undefined)]
+        : []
 
     const done: RenderChildren[] = []
     const now_: RenderChildren[] = []
@@ -2794,9 +2859,9 @@ export function registerGlance(on: On): void {
       if (one.status === 'done') {
         const ms = one.startedAt !== null && one.finishedAt !== null ? one.finishedAt - one.startedAt : null
         // Under the Done heading a time says how long it took; the terminal, with no heading in the column, says so.
-        const took = ms === null ? (vector ? '' : 'done') : vector ? (ms < 1000 ? '' : durationWords(ms)) : `took ${formatDuration(ms)}`
+        const took = ms === null ? (vector ? '' : tr('done')) : vector ? (ms < 1000 ? '' : durationWords(ms)) : tr('took {0}', formatDuration(ms))
         done.push(
-          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', 'Done') }, one.name, {}, [took, one.check ? CHECK_WORDS[one.check] : '', tokensOf(one)].filter(Boolean).join(' · ')),
+          row(key, { glyph: <Text color="green">✓ </Text>, icon: kit.icon('done', 'ok', tr('Done')) }, one.name, {}, [took, one.check ? tr(CHECK_WORDS[one.check]) : '', tokensOf(one)].filter(Boolean).join(' · ')),
           ...(one.summary ? [note(`${key}-summary`, one.summary)] : []),
           ...filesOf(key, one),
           ...helperRows(one),
@@ -2812,7 +2877,7 @@ export function registerGlance(on: On): void {
             key,
             {
               glyph: <Text color="cyan">▶ </Text>,
-              icon: waits ? kit.badge(status.icon, status.tone, status.lead) : kit.badge('play', 'active', 'Now'),
+              icon: waits ? kit.badge(status.icon, status.tone, tr(status.lead)) : kit.badge('play', 'active', tr('Now')),
             },
             one.name,
             { bold: true },
@@ -2824,21 +2889,23 @@ export function registerGlance(on: On): void {
             ? [
                 note(
                   `${key}-activity`,
-                  `${vector ? '' : 'Now: '}${list.activity.detail ?? list.activity.label}${list.activity.count > 1 ? ` (${list.activity.label.toLowerCase()}, ${list.activity.count} in a row)` : ''}`,
+                  ((doing: string) => (vector ? doing : tr('Now: {0}', doing)))(
+                    `${list.activity.detail ?? tr(list.activity.label)}${list.activity.count > 1 ? ` ${tr('({0}, {1} in a row)', tr(list.activity.label).toLowerCase(), list.activity.count)}` : ''}`,
+                  ),
                 ),
                 ...(isDetailed && list.activity.target && !(vector && one.files?.some(file => file.path.split('/').pop() === list.activity!.target))
-                  ? [note(`${key}-target`, vector ? list.activity.target : `↳ ${list.activity.target}`, vector ? kit.icon('sub', 'quiet', 'Runs', 13) : undefined, true)]
+                  ? [note(`${key}-target`, vector ? list.activity.target : `↳ ${list.activity.target}`, vector ? kit.icon('sub', 'quiet', tr('Runs'), 13) : undefined, true)]
                   : []),
               ]
             : []),
-          ...(tokensOf(one) ? [note(`${key}-tokens`, `${tokensOf(one)} so far`)] : []),
-          ...filesOf(key, one, ' so far'),
+          ...(tokensOf(one) ? [note(`${key}-tokens`, tr('{0} so far', tokensOf(one)))] : []),
+          ...filesOf(key, one, true),
           ...helperRows(one),
         )
       } else {
         const { expectedMs: expected } = stepEstimate(list, one, at)
         next_.push(
-          row(key, { glyph: <Text dimColor>○ </Text>, icon: kit.open('To do') }, one.name, { dim: true }, expected < 60_000 ? 'under a minute' : `about ${formatLeft(expected)}`),
+          row(key, { glyph: <Text dimColor>○ </Text>, icon: kit.open(tr('To do')) }, one.name, { dim: true }, expected < 60_000 ? tr('under a minute') : tr('about {0}', formatLeft(expected))),
           ...helperRows(one),
         )
       }
@@ -2859,10 +2926,10 @@ export function registerGlance(on: On): void {
     // Elsewhere than the terminal each helper's own row says it; the count would repeat them.
     if (list.helpers.length > 0 && !vector) {
       const finished = list.helpers.length - running
-      footer.push(`Helpers: ${[running > 0 ? `${running} working` : '', finished > 0 ? `${finished} finished` : ''].filter(Boolean).join(', ')}`)
+      footer.push(tr('Helpers: {0}', [running > 0 ? tr('{0} working', running) : '', finished > 0 ? tr('{0} finished', finished) : ''].filter(Boolean).join(', ')))
     }
     if (left !== null && list.paceMs !== null && doneCount < 2) {
-      footer.push('Time left is based on how long steps took in this project before.')
+      footer.push(tr('Time left is based on how long steps took in this project before.'))
     }
     if (isDetailed) {
       const usage = await read($, usageAtom)
@@ -2870,18 +2937,18 @@ export function registerGlance(on: On): void {
       const cached = list.tasks.reduce((sum, one) => sum + one.cachedTokens, list.extraCachedTokens)
       const spent = jobCost(list, usage)
       const job = [tokenNote(tokens, cached), spent === null ? '' : formatCost(spent)].filter(Boolean).join(' · ')
-      if (job) footer.push(`This job: ${job}`)
+      if (job) footer.push(tr('This job: {0}', job))
       const plan = [
-        ...usage.limits.map(one => `${one.label} ${Math.round(one.percent)}%`),
-        usage.contextPercent === null ? '' : `chat ${Math.round(usage.contextPercent)}% full`,
+        ...usage.limits.map(one => tr('{0} {1}%', tr(one.label), Math.round(one.percent))),
+        usage.contextPercent === null ? '' : tr('chat {0}% full', Math.round(usage.contextPercent)),
       ].filter(Boolean)
       // Elsewhere than the terminal "Plan" is a button: the line says Usage, as the band does.
-      if (plan.length > 0) footer.push(`${vector ? 'Usage' : 'Plan usage'}: ${plan.join(' · ')}`)
+      if (plan.length > 0) footer.push(vector ? tr('Usage: {0}', plan.join(' · ')) : tr('Plan usage: {0}', plan.join(' · ')))
     }
 
     const isDone = list.phase === 'done'
     // Elsewhere than the terminal the bar shows the percentage, which weighs steps by size: the words just count them.
-    const summary = `${vector ? '' : `${percent}% · `}${doneCount} of ${list.tasks.length} steps done${grew}`
+    const summary = `${vector ? '' : `${percent}% · `}${tr('{0} of {1} steps done', doneCount, list.tasks.length)}${grew}`
     const cells = Math.round(percent / 5)
     return (
       <Box flexDirection="column" width={columns}>
@@ -2893,18 +2960,18 @@ export function registerGlance(on: On): void {
         </Text>
         {list.goal && (
           <Text key="goal" wrap="wrap">
-            {`Goal: ${list.goal}`}
+            {tr('Goal: {0}', list.goal)}
           </Text>
         )}
         {list.doneWhen && (
           <Text key="done-when" wrap="wrap">
-            {`Done when: ${list.doneWhen}`}
+            {tr('Done when: {0}', list.doneWhen)}
           </Text>
         )}
         {(
           [
-            ['for-you', 'For you', list.forYou ?? []],
-            ['decided', 'Decided on its own', list.decided ?? []],
+            ['for-you', tr('For you'), list.forYou ?? []],
+            ['decided', tr('Decided on its own'), list.decided ?? []],
           ] as [string, string, string[]][]
         ).map(([key, heading, items]) =>
           items.length === 0 ? null : (
@@ -2918,7 +2985,7 @@ export function registerGlance(on: On): void {
         )}
         {vector ? (
           <Box key="progress" flexDirection="row" alignItems="center" gap={1} marginTop={1}>
-            <Box flexShrink={0}>{kit.meter(isDone ? 'ok' : 'active', percent, 0, `${percent}% done`, 160)}</Box>
+            <Box flexShrink={0}>{kit.meter(isDone ? 'ok' : 'active', percent, 0, tr('{0}% done', percent), 160)}</Box>
             <Text>{summary}</Text>
           </Box>
         ) : (
@@ -2930,11 +2997,11 @@ export function registerGlance(on: On): void {
         {status &&
           (vector ? (
             <Box key="status" flexDirection="row" gap={1} marginTop={1}>
-              {status.tone === 'active' ? kit.icon(status.icon, status.tone, STATUS) : kit.badge(status.icon, status.tone, STATUS)}
+              {status.tone === 'active' ? kit.icon(status.icon, status.tone, STATUS()) : kit.badge(status.icon, status.tone, STATUS())}
               <Box flexShrink={1}>
                 <Text wrap="wrap">
                   <Text bold>
-                    {status.lead}
+                    {tr(status.lead)}
                   </Text>
                   <Text>{` · ${status.text}`}</Text>
                 </Text>
@@ -2942,12 +3009,12 @@ export function registerGlance(on: On): void {
             </Box>
           ) : (
             <Text key="status" color={status.color} bold wrap="wrap">
-              {status.lead === 'Claude answered' ? `${status.lead}; ${status.text}` : `${status.lead}: ${status.text}`}
+              {status.lead === 'Claude answered' ? `${tr(status.lead)}; ${status.text}` : `${tr(status.lead)}: ${status.text}`}
             </Text>
           ))}
-        {section('done', 'Done', done)}
-        {section('now', 'Now', now_)}
-        {section('next', 'Next', next_)}
+        {section('done', tr('Done'), done)}
+        {section('now', tr('Now'), now_)}
+        {section('next', tr('Next'), next_)}
         {footer.length > 0 && (
           <Box key="footer" flexDirection="column" marginTop={1}>
             {footer.map((line, index) => (
@@ -2971,18 +3038,18 @@ export function registerGlance(on: On): void {
     const columns = Math.max(30, e.props.bodyColumns)
     const today = dayKey(await now($))
     // The app draws a panel's own close control; the terminal's panel needs the button.
-    const close = vector ? null : <Button key="close" label="Close" role="dismiss" onPress={() => $.ui.close({ id: HISTORY_PANE })} />
+    const close = vector ? null : <Button key="close" label={tr('Close')} role="dismiss" onPress={() => $.ui.close({ id: HISTORY_PANE })} />
     if (view === null) {
       return (
         <Box flexDirection="column">
-          <Text dimColor>Type /glanceflow history to see today's tasks.</Text>
+          <Text dimColor>{tr("Type /glanceflow history to see today's tasks.")}</Text>
           {close}
         </Box>
       )
     }
 
     // Day picker: earlier, a drop-down of saved days, later, and today.
-    const dayLabel = (day: string) => (vector ? (day === today ? `Today · ${longDay(day)}` : longDay(day)) : day === today ? `Today, ${day}` : day)
+    const dayLabel = (day: string) => (vector ? (day === today ? tr('Today · {0}', longDay(day)) : longDay(day)) : day === today ? tr('Today, {0}', day) : day)
     const picker = (
       <Box key="picker" flexDirection="column" marginBottom={1}>
         {/* The app titles the panel "History · <folder>"; the terminal's panel shows the day here too. */}
@@ -2992,13 +3059,13 @@ export function registerGlance(on: On): void {
           </Text>
         )}
         <Box key="controls" flexDirection="row" gap={1} alignItems={vector ? 'center' : undefined}>
-          <Button key="earlier" label={vector ? 'Previous day' : '◀ Earlier'} onPress={() => showHistory($, shiftDay(view.day, -1), false)} />
+          <Button key="earlier" label={vector ? tr('Previous day') : `◀ ${tr('Earlier')}`} onPress={() => showHistory($, shiftDay(view.day, -1), false)} />
           {'Select' in table && table.Select ? (
             <table.Select
               key="day"
               // The terminal's Select draws "label: value" itself, so the label carries no colon. The desktop's value
               // already starts with the day ("Today · …"): a label there would stutter.
-              label={vector ? undefined : 'Day'}
+              label={vector ? undefined : tr('Day')}
               value={view.day}
               options={view.days.map(day => ({ value: day, label: dayLabel(day) }))}
               onSelect={day => void showHistory($, day, false)}
@@ -3007,22 +3074,22 @@ export function registerGlance(on: On): void {
             <Text bold>{dayLabel(view.day)}</Text>
           )}
           {view.day < today && (
-            <Button key="later" label={vector ? 'Next day' : 'Later ▶'} onPress={() => showHistory($, shiftDay(view.day, 1), false)} />
+            <Button key="later" label={vector ? tr('Next day') : `${tr('Later')} ▶`} onPress={() => showHistory($, shiftDay(view.day, 1), false)} />
           )}
-          {view.day !== today && <Button key="today" label="Today" onPress={() => showHistory($, today, false)} />}
+          {view.day !== today && <Button key="today" label={tr('Today')} onPress={() => showHistory($, today, false)} />}
         </Box>
       </Box>
     )
 
     const report = reportOf(view)
     if (view.isReportShown) {
-      const copy = <Button key="copy" variant="primary" label="Copy report" onPress={() => showReport($, true, report, e.surface)} />
+      const copy = <Button key="copy" variant="primary" label={tr('Copy report')} onPress={() => showReport($, true, report, e.surface)} />
       return (
         <Box flexDirection="column" width={columns}>
           {picker}
           {vector && (
             <Text key="caption" dimColor>
-              What you'll paste
+              {tr("What you'll paste")}
             </Text>
           )}
           <Box
@@ -3042,14 +3109,14 @@ export function registerGlance(on: On): void {
             ))}
           </Box>
           <Box key="report-actions" flexDirection="row" gap={1} marginTop={1}>
-            {vector && <Button key="back" label="Back to the list" onPress={() => showReport($, false, report, e.surface)} />}
+            {vector && <Button key="back" label={tr('Back to the list')} onPress={() => showReport($, false, report, e.surface)} />}
             {!vector && copy}
             {view.reportSpan === 'mine' ? null : view.reportSpan === 'week' ? (
-              <Button key="span" label={vector ? 'Day report' : 'This day'} onPress={() => showReportSpan($, 'day', e.surface)} />
+              <Button key="span" label={vector ? tr('Day report') : tr('This day')} onPress={() => showReportSpan($, 'day', e.surface)} />
             ) : (
-              <Button key="span" label={vector ? 'Week report' : 'This week'} onPress={() => showReportSpan($, 'week', e.surface)} />
+              <Button key="span" label={vector ? tr('Week report') : tr('This week')} onPress={() => showReportSpan($, 'week', e.surface)} />
             )}
-            {!vector && <Button key="back" label="Back to the list" onPress={() => showReport($, false, report, e.surface)} />}
+            {!vector && <Button key="back" label={tr('Back to the list')} onPress={() => showReport($, false, report, e.surface)} />}
             {/* Elsewhere than the terminal the main button comes last, as a dialog's does. */}
             {vector && copy}
             {close}
@@ -3059,13 +3126,13 @@ export function registerGlance(on: On): void {
     }
 
     if (view.entries.length === 0) {
-      const words = 'No tasks saved for this project on that day yet.'
+      const words = tr('No tasks saved for this project on that day yet.')
       return (
         <Box flexDirection="column" width={columns}>
           {picker}
           {vector ? (
             <Box flexDirection="row" gap={1}>
-              {kit.icon('plan', 'quiet', NOTICE)}
+              {kit.icon('plan', 'quiet', NOTICE())}
               <Text dimColor wrap="wrap">
                 {words}
               </Text>
@@ -3074,7 +3141,7 @@ export function registerGlance(on: On): void {
             <Text dimColor>{words}</Text>
           )}
           <Box key="actions" flexDirection="row" gap={1} marginTop={1}>
-            <Button key="mine" label={vector ? 'All projects this week' : 'Your week'} onPress={() => showReportSpan($, 'mine', e.surface)} />
+            <Button key="mine" label={vector ? tr('All projects this week') : tr('Your week')} onPress={() => showReportSpan($, 'mine', e.surface)} />
             {close}
           </Box>
         </Box>
@@ -3091,21 +3158,21 @@ export function registerGlance(on: On): void {
     }
     const outcomeMark = (outcome: GlanceHistoryEntry['outcome']) =>
       outcome === 'done'
-        ? kit.icon('done', 'ok', 'Done')
+        ? kit.icon('done', 'ok', tr('Done'))
         : outcome === 'stopped'
-          ? kit.badge('stop', 'quiet', 'Stopped')
+          ? kit.badge('stop', 'quiet', tr('Stopped'))
           : outcome === 'stuck'
-            ? kit.badge('bang', 'alert', 'Stuck')
+            ? kit.badge('bang', 'alert', tr('Stuck'))
             : outcome === 'waiting'
-              ? kit.badge('bell', 'warn', 'Waiting')
+              ? kit.badge('bell', 'warn', tr('Waiting'))
               : outcome === 'background'
-                ? kit.icon('clock', 'active', 'In the background')
-                : kit.ring(null, 0, 'Working')
+                ? kit.icon('clock', 'active', tr('In the background'))
+                : kit.ring(null, 0, tr('Working'))
     const titleWidth = Math.max(12, Math.min(MAX_NAME, columns - 9 - 36))
     const rows = view.entries.map(one => {
       const [mark, color] = marks[one.outcome]
       // Elsewhere than the terminal times read as the report says them ("13 min"), so one job reads one way.
-      const took = one.finishedAt === null ? 'not finished' : (vector ? plainDuration : formatDuration)(one.finishedAt - one.startedAt)
+      const took = one.finishedAt === null ? tr('not finished') : (vector ? plainDuration : formatDuration)(one.finishedAt - one.startedAt)
       const details = [
         `${one.stepsDone}/${one.stepsTotal}`,
         took,
@@ -3133,14 +3200,14 @@ export function registerGlance(on: On): void {
               {kit.blank()}
               <Box flexShrink={1}>
                 <Text dimColor wrap="wrap">
-                  {`${one.stepsDone} of ${one.stepsTotal} steps · ${[took, tokenNote(one.newTokens + one.cachedTokens, one.cachedTokens), typeof one.costUsd === 'number' ? formatCost(one.costUsd) : ''].filter(Boolean).join(' · ')}`}
+                  {[tr('{0} of {1} steps', one.stepsDone, one.stepsTotal), took, tokenNote(one.newTokens + one.cachedTokens, one.cachedTokens), typeof one.costUsd === 'number' ? formatCost(one.costUsd) : ''].filter(Boolean).join(' · ')}
                 </Text>
               </Box>
             </Box>
             {files !== '' && (
               <Box key="files" flexDirection="row" gap={1} width={columns}>
                 {kit.blank()}
-                {kit.icon('file', 'quiet', 'Files', 13)}
+                {kit.icon('file', 'quiet', tr('Files'), 13)}
                 <Box flexShrink={1}>
                   <Text dimColor wrap="wrap">
                     {files}
@@ -3179,9 +3246,9 @@ export function registerGlance(on: On): void {
     const counts = (Object.keys(marks) as GlanceHistoryEntry['outcome'][])
       .map(outcome => [outcome, view.entries.filter(one => one.outcome === outcome).length] as const)
       .filter(([, count]) => count > 0)
-      .map(([outcome, count]) => `${count} ${outcome}`)
+      .map(([outcome, count]) => OUTCOME_COUNT[outcome](count))
     const total = [
-      `${view.entries.length} ${view.entries.length === 1 ? 'task' : 'tasks'}`,
+      view.entries.length === 1 ? tr('1 task') : tr('{0} tasks', view.entries.length),
       counts.join(', '),
       (vector ? plainDuration : formatDuration)(time),
       tokenNote(newTokens + cached, cached),
@@ -3196,20 +3263,20 @@ export function registerGlance(on: On): void {
         {rows}
         <Box key="total" marginTop={vector ? 0 : 1}>
           {vector ? (
-            <Text dimColor wrap="wrap">{`Total: ${total}`}</Text>
+            <Text dimColor wrap="wrap">{tr('Total: {0}', total)}</Text>
           ) : (
-            <Text bold wrap="truncate-end">{`Total: ${total}`}</Text>
+            <Text bold wrap="truncate-end">{tr('Total: {0}', total)}</Text>
           )}
         </Box>
         <Box key="actions" flexDirection="row" gap={1} marginTop={1}>
           <Button
             key="report"
             variant={vector ? 'secondary' : 'primary'}
-            label={vector ? (view.reportSpan === 'week' ? 'Week report' : 'Day report') : 'Team report'}
+            label={vector ? (view.reportSpan === 'week' ? tr('Week report') : tr('Day report')) : tr('Team report')}
             onPress={() => showReportSpan($, view.reportSpan === 'week' ? 'week' : 'day', e.surface)}
           />
           {/* Your week covers every project, so on the desktop its name says so beside this project's reports. */}
-          <Button key="mine" label={vector ? 'All projects this week' : 'Your week'} onPress={() => showReportSpan($, 'mine', e.surface)} />
+          <Button key="mine" label={vector ? tr('All projects this week') : tr('Your week')} onPress={() => showReportSpan($, 'mine', e.surface)} />
           {close}
         </Box>
       </Box>
@@ -3294,7 +3361,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       vector
         ? line(
             'others',
-            kit.icon(needsYou ? 'bell' : 'eye', needsYou ? 'warn' : 'quiet', NOTICE),
+            kit.icon(needsYou ? 'bell' : 'eye', needsYou ? 'warn' : 'quiet', NOTICE()),
             <Text wrap="truncate-end" dimColor={!needsYou}>
               {otherLine(Math.floor(columns / 0.8) - 3)}
             </Text>,
@@ -3311,10 +3378,10 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // What only the person can do or decide: the first in full, the rest in the Plan.
   const forYou = list?.forYou ?? []
   if (forYou.length > 0) {
-    const words = `For you: ${forYou[0]}${forYou.length > 1 ? ` · ${forYou.length - 1} more in Plan` : ''}`
+    const words = forYou.length > 1 ? tr('For you: {0} · {1} more in Plan', forYou[0]!, forYou.length - 1) : tr('For you: {0}', forYou[0]!)
     warnings.push(
       vector
-        ? line('for-you', kit.icon('bell', 'warn', NOTICE), <Text wrap="truncate-end">{words}</Text>)
+        ? line('for-you', kit.icon('bell', 'warn', NOTICE()), <Text wrap="truncate-end">{words}</Text>)
         : (
             <Box key="for-you" width={columns}>
               <Text wrap="truncate-end" color="yellow">{`${GLYPH.bell} ${words}`}</Text>
@@ -3345,20 +3412,20 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       <Button key={key} plain label={short ?? `${GLYPH[icon]} ${label}`} onPress={onPress} />
     )
   const handoffLabel =
-    armed === 'handoff' ? 'Press again to start a fresh chat' : handoff === 'working' ? 'Writing a handoff note…' : 'Fresh chat'
+    armed === 'handoff' ? tr('Press again to start a fresh chat') : handoff === 'working' ? tr('Writing a handoff note…') : tr('Fresh chat')
   // What steers the job (Pause, Start, Continue); elsewhere than the terminal it sits beside the job's status.
   // Elsewhere than the terminal a stuck job is tried again, and a usage limit won't lift for a press, so that
   // button stays quiet.
   const isStuck = list0?.phase === 'stuck'
-  const pauseLabel = 'Pause'
+  const pauseLabel = tr('Pause')
   const isLimitStuck = isStuck && /limit/i.test(list0?.stuckReason ?? '')
   // Beside "try again later" a usage limit's button checks whether it has lifted.
-  const continueLabel = vector && isStuck ? (isLimitStuck ? 'Check again' : 'Try again') : 'Continue'
+  const continueLabel = vector && isStuck ? (isLimitStuck ? tr('Check again') : tr('Try again')) : tr('Continue')
   const controls = isEnabled
     ? [
         canPause && action('pause', 'pause', pauseLabel, () => pauseJob($)),
-        list0?.approval === 'waiting' && action('aim', 'spark', 'Aim higher', () => aimHigher($)),
-        list0?.approval === 'waiting' && action('start', 'play', 'Start', () => startPlan($), undefined, true),
+        list0?.approval === 'waiting' && action('aim', 'spark', tr('Aim higher'), () => aimHigher($)),
+        list0?.approval === 'waiting' && action('start', 'play', tr('Start'), () => startPlan($), undefined, true),
         canContinue && action('continue', 'play', continueLabel, () => continueJob($), undefined, !(vector && isLimitStuck)),
       ].filter(Boolean)
     : []
@@ -3367,54 +3434,56 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // A fresh chat ends this one. Elsewhere than the terminal it stands apart from the places to go, and only once the
   // job has stopped or finished (mid-job, Tidy up now is the way to make room), or while a first press waits.
   // While a stopped job's chat is full, Tidy up now is the one way offered to make room.
+  // In a narrow band the words of the actions may be longer than the English: the short labels come in that much sooner.
+  const wordsWider = Math.max(0, ['Pause', 'Plan', 'History', 'Fresh chat', 'Ship it'].reduce((sum, word) => sum + widthOf(tr(word)) - widthOf(word), 0))
   const handoffItem =
     list0 !== null &&
     (!vector || list0.phase === 'done' || (list0.phase === 'stopped' && !isChatFull) || handoff === 'working' || armed === 'handoff') &&
-    action('handoff', 'fresh', handoffLabel, () => pressHandoff($), handoffLabel === 'Fresh chat' && columns < 40 ? '↻ Fresh' : undefined)
+    action('handoff', 'fresh', handoffLabel, () => pressHandoff($), handoffLabel === tr('Fresh chat') && columns < 40 + wordsWider ? `↻ ${tr('Fresh')}` : undefined)
   // Finish on GitHub: once the job is done, one press closes it out; a merged pull request archives the chat.
   const shipItem =
     canShip &&
     (list0?.phase === 'done' || armed === 'ship') &&
-    action('ship', 'ship', armed === 'ship' ? 'Press again to ship' : 'Ship it', () => pressTwice($, 'ship', () => shipIt($)), undefined, armed !== 'ship')
+    action('ship', 'ship', armed === 'ship' ? tr('Press again to ship') : tr('Ship it'), () => pressTwice($, 'ship', () => shipIt($)), undefined, armed !== 'ship')
   // Where to go from here: the plan, the history, the settings.
   const places = isEnabled
     ? [
-        list0?.hasPlan && action('plan', 'plan', 'Plan', () => showPlan($)),
+        list0?.hasPlan && action('plan', 'plan', tr('Plan'), () => showPlan($)),
         // ≣, not ☰: Unicode 16 made ☰ two cells wide, and the row shifted in newer terminals.
-        action('history', 'history', 'History', () => showHistory($, dayKey(current), true)),
-        action('settings', 'sliders', 'Settings', () => showSettings($), columns < 60 ? '⚙' : undefined),
+        action('history', 'history', tr('History'), () => showHistory($, dayKey(current), true)),
+        action('settings', 'sliders', tr('Settings'), () => showSettings($), columns < 60 + wordsWider ? '⚙' : undefined),
         !vector && handoffItem,
         !vector && shipItem,
       ].filter(Boolean)
     : []
   const actionItems = isEnabled ? [...controls, ...places] : null
-  const chatPart = usage.contextPercent === null ? '' : `chat ${Math.round(usage.contextPercent)}% full`
+  const chatPart = usage.contextPercent === null ? '' : tr('chat {0}% full', Math.round(usage.contextPercent))
   const usageParts = [
-    ...usage.limits.map(one => `${one.label} ${Math.round(one.percent)}%`),
+    ...usage.limits.map(one => tr('{0} {1}%', tr(one.label), Math.round(one.percent))),
     // On the terminal the line below says how full the chat is, with the button to tidy it up: not twice.
     isChatFull && !vector ? '' : chatPart,
   ].filter(Boolean)
   const top = usage.limitPercent ?? 0
   const isHigh = top >= LIMIT_WARN
   const reset = isHigh ? resetTime(usage.limitResetsAt, await now($)) : null
-  const tidy = <Button key="compact" label={vector ? 'Tidy up now' : 'Tidy it up'} onPress={() => tidyUp($)} />
+  const tidy = <Button key="compact" label={vector ? tr('Tidy up now') : tr('Tidy it up')} onPress={() => tidyUp($)} />
   if (vector) {
     // One quiet row: the details view always shows usage; the simple view only near a limit or with the chat past the
     // tidy-up mark, whose button sits with the other actions. The icon carries the colour, as the app's own notices do.
     if (usageParts.length > 0 && (isDetailed || isHigh || isChatFull)) {
       const words = isHigh
-        ? [`You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit`, reset === null ? '' : `resets ${reset}`, isChatFull ? chatPart : '']
+        ? [tr("You've used {0}% of your {1} limit", Math.round(top), tr(usage.limitLabel ?? 'plan')), reset === null ? '' : tr('resets {0}', reset), isChatFull ? chatPart : '']
         : isDetailed
-          ? [`Usage: ${usageParts[0] ?? ''}`, ...usageParts.slice(1)]
-          : [`This ${chatPart.replace(/^chat/, 'chat is')}`, 'tidying up keeps a checkpoint first']
+          ? [tr('Usage: {0}', usageParts[0] ?? ''), ...usageParts.slice(1)]
+          : [tr('This chat is {0}% full', Math.round(usage.contextPercent ?? 0)), tr('tidying up keeps a checkpoint first')]
       warnings.push(
         line(
           'limit',
           isHigh
-            ? kit.icon('alert', top >= LIMIT_ALERT ? 'alert' : 'warn', NOTICE)
+            ? kit.icon('alert', top >= LIMIT_ALERT ? 'alert' : 'warn', NOTICE())
             : isChatFull
-              ? kit.icon('tidy', 'warn', NOTICE)
-              : kit.icon('clock', 'quiet', NOTICE),
+              ? kit.icon('tidy', 'warn', NOTICE())
+              : kit.icon('clock', 'quiet', NOTICE()),
           // Whole pieces, as in the header: about 0.8 of a cell a character, less the mark.
           <Text wrap="truncate-end" dimColor={!isHigh}>
             {wholePieces(words, Math.floor(columns / 0.8) - 3)}
@@ -3426,8 +3495,10 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     // The simple view speaks up only near a limit; the detailed view always shows usage.
     const color = top >= LIMIT_ALERT ? 'red' : isHigh ? 'yellow' : undefined
     const words = isHigh
-      ? `You've used ${Math.round(top)}% of your ${usage.limitLabel ?? 'plan'} limit${reset === null ? '' : ` · resets ${reset}`} · ${usageParts.join(' · ')}`
-      : `Plan usage: ${usageParts.join(' · ')}`
+      ? [tr("You've used {0}% of your {1} limit", Math.round(top), tr(usage.limitLabel ?? 'plan')), reset === null ? '' : tr('resets {0}', reset), usageParts.join(' · ')]
+          .filter(Boolean)
+          .join(' · ')
+      : tr('Plan usage: {0}', usageParts.join(' · '))
     warnings.push(
       <Box key="limit" width={columns}>
         <Text wrap="truncate-end" color={color} dimColor={!isHigh}>
@@ -3437,7 +3508,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     )
   }
   if (isChatFull && !vector && usage.contextPercent !== null) {
-    const words = `This chat is ${Math.round(usage.contextPercent)}% full. Claude saves a checkpoint before tidying up.`
+    const words = tr('This chat is {0}% full. Claude saves a checkpoint before tidying up.', Math.round(usage.contextPercent))
     warnings.push(
       <Box key="long-chat" flexDirection="row" justifyContent="space-between" width={columns}>
         <Box flexShrink={1}>
@@ -3451,8 +3522,8 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   }
 
   const isRecapShown = isEnabled && (await read($, recapAtom))
-  const recapButton = <Button key="recap" label="Where we left off" onPress={() => showRecap($)} />
-  const recapOk = <Button key="recap-ok" plain={vector ? undefined : true} label="OK" onPress={() => update($, recapAtom, () => false)} />
+  const recapButton = <Button key="recap" label={tr('Where we left off')} onPress={() => showRecap($)} />
+  const recapOk = <Button key="recap-ok" plain={vector ? undefined : true} label={tr('OK')} onPress={() => update($, recapAtom, () => false)} />
   if (isRecapShown) {
     const buttons = (
       <Box flexDirection="row" gap={1}>
@@ -3465,14 +3536,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         // Its buttons sit with the other actions at the bottom right.
         line(
           'recap',
-          kit.badge('check', 'ok', NOTICE),
-          <Text wrap="truncate-end">Chat tidied up. Claude kept a checkpoint of the work.</Text>,
+          kit.badge('check', 'ok', NOTICE()),
+          <Text wrap="truncate-end">{tr('Chat tidied up. Claude kept a checkpoint of the work.')}</Text>,
         )
       ) : (
         <Box key="recap" flexDirection="row" justifyContent="space-between" width={columns}>
           <Box flexShrink={1}>
             <Text wrap="truncate-end" color="green">
-              ✓ Chat tidied up. Claude kept a checkpoint of the work.
+              {`✓ ${tr('Chat tidied up. Claude kept a checkpoint of the work.')}`}
             </Text>
           </Box>
           {buttons}
@@ -3488,12 +3559,12 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     vector && 'Select' in table && table.Select ? (
       <table.Select
         key="view"
-        label="View"
+        label={tr('View')}
         value={view}
         options={[
-          { value: 'detailed', label: 'Detailed' },
-          { value: 'simple', label: 'Simple' },
-          { value: 'off', label: 'Off' },
+          { value: 'detailed', label: tr('Detailed') },
+          { value: 'simple', label: tr('Simple') },
+          { value: 'off', label: tr('Off') },
         ]}
         onSelect={value => void setView($, value as typeof view)}
       />
@@ -3502,18 +3573,18 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       key="toggle"
       label={
         vector
-          ? `View: ${view === 'off' ? 'Off' : view === 'detailed' ? 'Detailed' : 'Simple'}`
+          ? tr('View: {0}', view === 'off' ? tr('Off') : view === 'detailed' ? tr('Detailed') : tr('Simple'))
           : columns < NARROW
             ? !isEnabled
-              ? '○ Off'
+              ? `○ ${tr('Off')}`
               : isDetailed
-                ? '● Details'
-                : '● Simple'
+                ? `● ${tr('Details')}`
+                : `● ${tr('Simple')}`
             : !isEnabled
-              ? '○ GlanceFlow: Off'
+              ? `○ GlanceFlow: ${tr('Off')}`
               : isDetailed
-                ? '● GlanceFlow: Details'
-                : '● GlanceFlow: Simple'
+                ? `● GlanceFlow: ${tr('Details')}`
+                : `● GlanceFlow: ${tr('Simple')}`
       }
       variant={isEnabled && !vector ? 'primary' : 'secondary'}
       onPress={() => cycleMode($, isEnabled, isDetailed)}
@@ -3546,7 +3617,8 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // The header's right end holds the view, on every surface: elsewhere than the terminal a menu, as wide as
   // "View Detailed" at about 0.8 of a cell a character, and its arrow and padding.
   const headerRight = button
-  const rightCells = vector ? Math.ceil('View Detailed'.length * 0.8) + 4 : columns < NARROW ? 15 : 27
+  const viewWider = Math.max(0, Math.max(...[tr('Details'), tr('Simple'), tr('Off')].map(widthOf)) - widthOf('Details'))
+  const rightCells = vector ? Math.ceil(widthOf(`${tr('View')} ${tr('Detailed')}`) * 0.8) + 4 : (columns < NARROW ? 15 : 27) + viewWider
   // In characters. Elsewhere than the terminal the app's font sets about 0.8 of a cell a character, so the header
   // counts that many more before it cuts its words.
   const headerWidth = Math.max(0, vector ? Math.floor((columns - rightCells - 2) / 0.8) : columns - rightCells)
@@ -3583,7 +3655,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
 
   const tourStep = isEnabled && list === null ? await read($, tourAtom) : null
   if (tourStep !== null) {
-    const isLast = tourStep === TOUR.length - 1
+    const isLast = tourStep === TOUR_CARDS - 1
     if (vector) {
       // The checklist's frame: the view at the top right; under the words the places to go on the left, and on the
       // right the tour's own buttons, Next last.
@@ -3591,26 +3663,26 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         <Box flexDirection="column" width={columns}>
           {row(
             <Box flexDirection="row" alignItems="center" gap={1}>
-              {kit.icon('spark', 'active', STATUS)}
+              {kit.icon('spark', 'active', STATUS())}
               <Text bold wrap="truncate-end">
-                {leadOf(['Welcome to GlanceFlow', 'Welcome'])}
+                {leadOf([tr('Welcome to GlanceFlow'), tr('Welcome')])}
               </Text>
             </Box>,
           )}
-          {line('tour-text', kit.blank(), <Text wrap="wrap">{TOUR_VECTOR[tourStep]}</Text>)}
+          {line('tour-text', kit.blank(), <Text wrap="wrap">{tourCards(true)[tourStep]}</Text>)}
           {warnings}
           <Box key="tour" flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2} rowGap={1} flexWrap="wrap" width={columns} marginTop={1}>
             <Box flexDirection="row" alignItems="center" columnGap={1}>
-              {action('history', 'history', 'History', () => showHistory($, dayKey(current), true))}
-              {action('settings', 'sliders', 'Settings', () => showSettings($))}
+              {action('history', 'history', tr('History'), () => showHistory($, dayKey(current), true))}
+              {action('settings', 'sliders', tr('Settings'), () => showSettings($))}
             </Box>
             <Box flexDirection="row" alignItems="center" justifyContent="flex-end" columnGap={1} flexGrow={1}>
               {lifted.buttons as RenderElement[]}
               <Box alignItems="center" marginLeft={1} marginRight={1}>
-                {kit.dots(TOUR.length, tourStep)}
+                {kit.dots(TOUR_CARDS, tourStep)}
               </Box>
-              {!isLast && <Button key="tour-skip" label="Skip" onPress={() => stepTour($, null)} />}
-              <Button key="tour-next" variant="primary" label={isLast ? 'Got it' : 'Next'} onPress={() => stepTour($, tourStep + 1)} />
+              {!isLast && <Button key="tour-skip" label={tr('Skip')} onPress={() => stepTour($, null)} />}
+              <Button key="tour-next" variant="primary" label={isLast ? tr('Got it') : tr('Next')} onPress={() => stepTour($, tourStep + 1)} />
             </Box>
           </Box>
         </Box>,
@@ -3618,11 +3690,11 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     }
     return withBeneath(
       <Box flexDirection="column" width={columns}>
-        <Text bold wrap="truncate-end">{`Welcome to GlanceFlow · ${tourStep + 1} of ${TOUR.length}`}</Text>
-        <Text wrap="wrap">{TOUR[tourStep]}</Text>
+        <Text bold wrap="truncate-end">{tr('Welcome to GlanceFlow · {0} of {1}', tourStep + 1, TOUR_CARDS)}</Text>
+        <Text wrap="wrap">{tourCards(false)[tourStep]}</Text>
         <Box key="tour" flexDirection="row" gap={2} marginBottom={1}>
-          <Button key="tour-next" plain label={isLast ? '✓ Got it' : 'Next ▶'} onPress={() => stepTour($, tourStep + 1)} />
-          {!isLast && <Button key="tour-skip" plain label="Skip" onPress={() => stepTour($, null)} />}
+          <Button key="tour-next" plain label={isLast ? `✓ ${tr('Got it')}` : `${tr('Next')} ▶`} onPress={() => stepTour($, tourStep + 1)} />
+          {!isLast && <Button key="tour-skip" plain label={tr('Skip')} onPress={() => stepTour($, null)} />}
         </Box>
         {warnings}
         {actions}
@@ -3631,7 +3703,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   }
 
   if (list === null) {
-    const hint = vector ? 'Ask Claude for something, and its plan shows here' : 'Ask Claude for something: its plan shows here'
+    const hint = vector ? tr('Ask Claude for something, and its plan shows here') : tr('Ask Claude for something: its plan shows here')
     // Nothing to show yet. Elsewhere than the terminal it keeps the checklist's frame: the hint and the view on top;
     // below, the places to go on the left and, when the chat is full, Tidy up now on the right.
     return withBeneath(
@@ -3640,14 +3712,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
           !isEnabled ? (
             vector ? (
               <Text dimColor wrap="truncate-end">
-                GlanceFlow is off: Claude Code shows everything as usual
+                {tr('GlanceFlow is off: Claude Code shows everything as usual')}
               </Text>
             ) : (
               <Text> </Text>
             )
           ) : vector ? (
             <Box flexDirection="row" alignItems="center" gap={1}>
-              {kit.icon('plan', 'quiet', 'No plan yet')}
+              {kit.icon('plan', 'quiet', tr('No plan yet'))}
               <Text dimColor wrap="truncate-end">
                 {wholePieces([hint], headerWidth - 3)}
               </Text>
@@ -3681,12 +3753,12 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     list.phase === 'stuck'
       ? // Elsewhere than the terminal a usage limit reads as a short fact, with when it lifts where the app has told us.
         vector && /limit/i.test(list.stuckReason ?? '')
-        ? `Usage limit reached · ${limitResets === null ? 'try again later' : `resets ${limitResets}`}`
-        : (list.stuckReason ?? FAILING)
+        ? `${tr('Usage limit reached')} · ${limitResets === null ? tr('try again later') : tr('resets {0}', limitResets)}`
+        : tr(list.stuckReason ?? FAILING)
       : list.phase === 'stopped'
         ? list.stopKind === 'pause'
-          ? 'press Continue to pick up'
-          : 'you pressed Esc'
+          ? tr('press Continue to pick up')
+          : tr('you pressed Esc')
         : ''
   const isReasonOnStep = vector && activeStep !== undefined
   // Both views fill the current step from its time estimate, so the percentage moves before a step is checked off.
@@ -3697,8 +3769,9 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // risk words come last, and they must never be the part that is cut off.
   let headerNote: RenderChildren = null
   if (list.phase === 'needsYou') {
-    const reason = needsText(list) ?? PERMISSION
-    const fits = widthOf(reason) <= (vector ? headerWidth - 6 - widthOf('Needs you') : headerWidth - 12)
+    const reason = needsText(list) ?? tr(PERMISSION)
+    // On the terminal the label takes its words, a space either side, and one more before the reason.
+    const fits = widthOf(reason) <= (vector ? headerWidth - 6 - widthOf(tr('Needs you')) : headerWidth - widthOf(tr('Needs you')) - 3)
     const shown = fits ? [reason] : []
     if (!fits) {
       headerNote = vector ? (
@@ -3711,35 +3784,35 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     }
     header = vector ? (
       // The amber is in the icon; the words keep the app's text colour, which reads on a light window too.
-      headline(kit.badge('bell', 'warn', STATUS), 'Needs you', shown, { isRestPlain: true })
+      headline(kit.badge('bell', 'warn', STATUS()), tr('Needs you'), shown, { isRestPlain: true })
     ) : (
       <Text wrap="truncate-end">
         <Text bold inverse color="yellow">
-          {' Needs you '}
+          {` ${tr('Needs you')} `}
         </Text>
         {fits && <Text> {reason}</Text>}
       </Text>
     )
   } else if (list.phase === 'stuck') {
     header = vector ? (
-      headline(kit.badge('bang', 'alert', STATUS), 'Stuck', isReasonOnStep ? [list.title] : [reason, list.title])
+      headline(kit.badge('bang', 'alert', STATUS()), tr('Stuck'), isReasonOnStep ? [list.title] : [reason, list.title])
     ) : (
       <Text wrap="truncate-end" color="yellow" bold={isCalm}>
-        {fit(`⚠ Stuck: ${list.stuckReason ?? FAILING}`, headerWidth).trimEnd()}
+        {fit(`⚠ ${tr('Stuck: {0}', tr(list.stuckReason ?? FAILING))}`, headerWidth).trimEnd()}
       </Text>
     )
   } else if (list.phase === 'stopped') {
     const isPause = list.stopKind === 'pause'
     header = vector ? (
       headline(
-        kit.badge(isPause ? 'pause' : 'stop', 'quiet', STATUS),
-        isPause ? 'Paused' : 'Stopped',
+        kit.badge(isPause ? 'pause' : 'stop', 'quiet', STATUS()),
+        isPause ? tr('Paused') : tr('Stopped'),
         isReasonOnStep ? [list.title] : [reason, list.title],
       )
     ) : (
       <Text wrap="truncate-end" dimColor={!isCalm} bold={isCalm}>
         {fit(
-          isPause ? `‖ Paused · press Continue to pick up · ${list.title}` : `■ Stopped · you pressed Esc · ${list.title}`,
+          isPause ? `‖ ${tr('Paused')} · ${tr('press Continue to pick up')} · ${list.title}` : `■ ${tr('Stopped')} · ${tr('you pressed Esc')} · ${list.title}`,
           headerWidth,
         ).trimEnd()}
       </Text>
@@ -3748,25 +3821,25 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     const running = list.helpers.filter(one => one.status === 'running').length
     header = vector ? (
       headline(
-        kit.icon('clock', 'active', STATUS),
-        ['Still working in the background', 'In the background', 'Background'],
-        [`${running} left`, list.title, elapsed],
+        kit.icon('clock', 'active', STATUS()),
+        [tr('Still working in the background'), tr('In the background'), tr('Background')],
+        [tr('{0} left', running), list.title, elapsed],
       )
     ) : (
       <Text wrap="truncate-end" color="cyan" bold={isCalm}>
-        {fit(`◷ Still working in the background · ${running} left · ${list.title} · ${elapsed}`, headerWidth).trimEnd()}
+        {fit(`◷ ${tr('Still working in the background')} · ${tr('{0} left', running)} · ${list.title} · ${elapsed}`, headerWidth).trimEnd()}
       </Text>
     )
   } else if (list.phase === 'done') {
     // Whether the code the job changed was tested: outside proof, not Claude's own word.
     const check = jobCheck(list.tasks)
-    const checkWords = check === null ? '' : CHECK_WORDS[check]
+    const checkWords = check === null ? '' : tr(CHECK_WORDS[check])
     header = vector ? (
-      headline(kit.badge('check', 'ok', STATUS), 'All done', [list.title, checkWords, `took ${elapsed}`, jobTokenNote])
+      headline(kit.badge('check', 'ok', STATUS()), tr('All done'), [list.title, checkWords, tr('took {0}', elapsed), jobTokenNote])
     ) : (
       <Text wrap="truncate-end" color="green" bold={isCalm}>
         {fit(
-          `✓ All done · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · took ${elapsed}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
+          `✓ ${tr('All done')} · ${list.title}${checkWords ? ` · ${checkWords}` : ''} · ${tr('took {0}', elapsed)}${jobTokenNote ? ` · ${jobTokenNote}` : ''}`,
           headerWidth,
         ).trimEnd()}
       </Text>
@@ -3778,12 +3851,12 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     // Time left replaces time spent once there is an estimate. Elsewhere than the terminal the ring shows the
     // percentage, so the words count steps, as the Plan does.
     const stepsDone = list.tasks.filter(one => one.status === 'done').length
-    const lead = list.approval === 'waiting' ? 'Plan ready' : 'Working'
+    const lead = list.approval === 'waiting' ? tr('Plan ready') : tr('Working')
     const pieces = [
-      list.hasPlan ? (vector ? `${stepsDone} of ${list.tasks.length} done` : `${overall}%`) : '',
+      list.hasPlan ? (vector ? tr('{0} of {1} done', stepsDone, list.tasks.length) : `${overall}%`) : '',
       // Elsewhere than the terminal a bare "8s" could read as time left: it says so.
-      left === null ? (vector ? `${elapsed} so far` : elapsed) : `about ${formatLeft(left)} left`,
-      hasGrown ? `plan grew ${list.plannedCount} → ${list.tasks.length}` : '',
+      left === null ? (vector ? tr('{0} so far', elapsed) : elapsed) : tr('about {0} left', formatLeft(left)),
+      hasGrown ? tr('plan grew {0} → {1}', list.plannedCount, list.tasks.length) : '',
       jobTokenNote,
     ]
     // Elsewhere than the terminal, where the job's name leaves no room for how far it is, the name gives way: the
@@ -3799,7 +3872,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     header = vector ? (
       // Every state's header reads the same way: its mark, the state in bold, then the job and how far it is.
       headline(
-        list.hasPlan ? kit.ring(overall, 0, `${overall}% done`) : kit.ring(null, isCalm ? 0 : tick, STATUS),
+        list.hasPlan ? kit.ring(overall, 0, tr('{0}% done', overall)) : kit.ring(null, isCalm ? 0 : tick, STATUS()),
         lead,
         keepsTitle ? ` · ${list.title}${details}` : details,
       )
@@ -3824,15 +3897,17 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // Name column: whatever the row leaves after mark, meter and label, so rows never wrap.
   const hasMeter = columns >= METER_MIN_COLUMNS
   const bar = (cells: string) => (hasMeter ? ` ${cells} ` : ' ')
-  const nameWidth = Math.max(4, Math.min(MAX_NAME, columns - 2 - 2 - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1))
+  // The label column fits the longest state word in the person's language: LABEL_WIDTH in English.
+  const labelWidth = Math.max(LABEL_WIDTH, ...[tr('Done'), tr('Working'), tr('Waiting'), tr('Stuck'), tr('Paused'), tr('Stopped')].map(widthOf))
+  const nameWidth = Math.max(4, Math.min(MAX_NAME, columns - 2 - 2 - (hasMeter ? METER + 2 : 1) - labelWidth - 1))
   const room = Math.max(1, maxRows - 1 - (headerNote ? 1 : 0) - warnings.length - (actions ? 1 : 0))
   const firstUpcoming = list.tasks.findIndex(one => one.status === 'upcoming')
   // What is left of the row after mark, name, meter and label: the step's tokens, when they fit.
-  const usageRoom = columns - 2 - nameWidth - (hasMeter ? METER + 2 : 1) - LABEL_WIDTH - 1
+  const usageRoom = columns - 2 - nameWidth - (hasMeter ? METER + 2 : 1) - labelWidth - 1
   const noteOf = (one: GlanceTask) => {
     let timeNote = ''
     if (one.status === 'done' && one.startedAt !== null && one.finishedAt !== null) {
-      timeNote = `took ${(vector ? durationWords : formatDuration)(one.finishedAt - one.startedAt)}`
+      timeNote = tr('took {0}', (vector ? durationWords : formatDuration)(one.finishedAt - one.startedAt))
     } else if (one.status === 'active') {
       const estimate = stepEstimate(list, one, stepClock)
       // Elsewhere than the terminal the band gives the step's time left alone; the Plan keeps the time spent too.
@@ -3923,13 +3998,13 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   // Where the current step stands: the word says when Claude isn't working on it.
   const standing =
     list.phase === 'needsYou'
-      ? { mark: '‖ ', label: 'Waiting', icon: 'bell' as const, tone: 'warn' as const }
+      ? { mark: '‖ ', label: tr('Waiting'), icon: 'bell' as const, tone: 'warn' as const }
       : list.phase === 'stuck'
-        ? { mark: '⚠ ', label: 'Stuck', icon: 'bang' as const, tone: 'alert' as const }
+        ? { mark: '⚠ ', label: tr('Stuck'), icon: 'bang' as const, tone: 'alert' as const }
         : list.phase === 'stopped'
           ? list.stopKind === 'pause'
-            ? { mark: '‖ ', label: 'Paused', icon: 'pause' as const, tone: 'quiet' as const }
-            : { mark: '■ ', label: 'Stopped', icon: 'stop' as const, tone: 'quiet' as const }
+            ? { mark: '‖ ', label: tr('Paused'), icon: 'pause' as const, tone: 'quiet' as const }
+            : { mark: '■ ', label: tr('Stopped'), icon: 'stop' as const, tone: 'quiet' as const }
           : null
 
   // Every line: each step, then the helpers working under it.
@@ -3939,7 +4014,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     const key = `task-${index}`
     if (one.status === 'done' && foldsDone) {
       if (one !== doneSteps[0]) return
-      const words = `${doneSteps.length} steps done`
+      const words = tr('{0} steps done', doneSteps.length)
       lines.push({
         key,
         steps: doneSteps.length,
@@ -3948,7 +4023,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
           // A summary of steps, not a step: its own quiet mark, so the tick and the ring stay for real steps.
           step(
             key,
-            kit.icon('more', 'quiet', 'Folded'),
+            kit.icon('more', 'quiet', tr('Folded')),
             <Text dimColor wrap="truncate-end">
               {fitted(words, '', roomFor(0)).name}
             </Text>,
@@ -3959,7 +4034,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             <Text color="green">✓ </Text>
             <Text dimColor>{fit(words, nameWidth)}</Text>
             <Text color="green">{bar('█'.repeat(METER))}</Text>
-            <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
+            <Text dimColor>{fit(tr('Done'), labelWidth)}</Text>
           </Box>
         ),
       })
@@ -3972,7 +4047,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     if (one.status === 'upcoming' && foldsLater && index !== firstUpcoming) {
       if (one !== laterSteps[0]) return
       // Elsewhere than the terminal the row says where the rest are.
-      const words = vector ? `${laterSteps.length} more steps in Plan` : `${laterSteps.length} more steps`
+      const words = vector ? tr('{0} more steps in Plan', laterSteps.length) : tr('{0} more steps', laterSteps.length)
       lines.push({
         key,
         steps: laterSteps.length,
@@ -3980,7 +4055,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         element: vector ? (
           step(
             key,
-            kit.icon('more', 'quiet', 'Folded'),
+            kit.icon('more', 'quiet', tr('Folded')),
             <Text dimColor wrap="truncate-end">
               {fitted(words, '', roomFor(0)).name}
             </Text>,
@@ -3991,7 +4066,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             <Text dimColor>○ </Text>
             <Text dimColor>{fit(words, nameWidth)}</Text>
             <Text dimColor>{bar('░'.repeat(METER))}</Text>
-            <Text dimColor>Later</Text>
+            <Text dimColor>{tr('Later')}</Text>
           </Box>
         ),
       })
@@ -4006,7 +4081,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         element: vector ? (
           step(
             key,
-            kit.icon('done', 'ok', 'Done'),
+            kit.icon('done', 'ok', tr('Done')),
             <Text dimColor wrap="truncate-end">
               {done.name}
             </Text>,
@@ -4017,7 +4092,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             <Text color="green">✓ </Text>
             <Text dimColor>{fit(one.name, nameWidth)}</Text>
             <Text color="green">{bar('█'.repeat(METER))}</Text>
-            <Text dimColor>{fit('Done', LABEL_WIDTH)}</Text>
+            <Text dimColor>{fit(tr('Done'), labelWidth)}</Text>
             {usageCell(one)}
           </Box>
         ),
@@ -4030,14 +4105,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       const shownPercent = isDetailed ? stepEstimate(list, one, stepClock).percent : one.percent
       // Elsewhere than the terminal a bar shows only while Claude works on the step: a frozen one says nothing.
       const hasPercent = (isDetailed || one.hasReported) && !(vector && standing !== null)
-      const label = standing?.label ?? (hasPercent ? `${shownPercent}%` : 'Working')
+      const label = standing?.label ?? (hasPercent ? `${shownPercent}%` : tr('Working'))
       // Only a step Claude is working on moves; one that waits on you or has stopped stands still.
       const isStill = isCalm || standing !== null
       let element: RenderChildren
       if (vector && list.approval === 'waiting') {
         // Nothing has started while the plan waits for Start: the first step is one more to come, and the amber of
         // the header is the only call on you.
-        element = step(key, kit.open('Next'), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
+        element = step(key, kit.open(tr('Next')), <Text wrap="truncate-end">{fitted(one.name, '', roomFor(0)).name}</Text>, '')
       } else if (vector) {
         // The bar shows how far the step is, so no number stands beside it; a step that waits on you or has stopped
         // goes grey, the header saying why. With no progress reported yet there is no bar, only what Claude is
@@ -4048,7 +4123,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             ? ''
             : activity.detail !== null && widthOf(activity.detail) <= 48
               ? activity.detail
-              : `${activity.label}${activity.count > 1 ? ` (${activity.count})` : ''}`
+              : `${tr(activity.label)}${activity.count > 1 ? ` (${activity.count})` : ''}`
         // Before Claude reports how far it is, a short bar travels along the track: the row reads as every working
         // row does, and no word repeats the header. A calm screen keeps still, so it shows no bar then.
         const isSweeping = standing === null && !hasPercent && !isCalm
@@ -4068,7 +4143,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         // The bar says how far the step is, so the mark beside the name says Now, as the Plan's does, not that again.
         element = step(
           key,
-          kit.badge(standing?.icon ?? 'play', standing?.tone ?? 'active', standing?.label ?? 'Now'),
+          kit.badge(standing?.icon ?? 'play', standing?.tone ?? 'active', standing?.label ?? tr('Now')),
           <Text bold wrap="truncate-end">
             {shown.name}
           </Text>,
@@ -4092,10 +4167,10 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             : Array.from({ length: METER }, (_, cell) => (cell >= sweepAt - 2 && cell <= sweepAt ? '█' : '░')).join('')
         element = (
           <Box key={key} flexDirection="row">
-            <Text color={standing?.label === 'Stuck' ? 'yellow' : 'cyan'}>{standing?.mark ?? '▶ '}</Text>
+            <Text color={standing?.icon === 'bang' ? 'yellow' : 'cyan'}>{standing?.mark ?? '▶ '}</Text>
             <Text bold>{fit(one.name, nameWidth)}</Text>
             <Text color="cyan">{bar(meter)}</Text>
-            <Text>{fit(label, LABEL_WIDTH)}</Text>
+            <Text>{fit(label, labelWidth)}</Text>
             {usageCell(one)}
           </Box>
         )
@@ -4104,13 +4179,13 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       // What Claude is doing right now, in plain words: a line of its own on the terminal; elsewhere it follows the bar.
       if (list.phase === 'working' && list.activity !== null && !vector) {
         const { label: doing, count, detail } = list.activity
-        const plain = `${doing}${count > 1 ? ` (${count})` : ''}`
+        const plain = `${tr(doing)}${count > 1 ? ` (${count})` : ''}`
         // Claude's own sentence when it fits the line whole; otherwise the short plain label, never a cut sentence.
-        const sentence = detail !== null && widthOf(`    Now: ${detail}`) <= columns - 1 ? `Now: ${detail}` : plain
+        const sentence = detail !== null && widthOf(`    ${tr('Now: {0}', detail)}`) <= columns - 1 ? tr('Now: {0}', detail) : plain
         lines.push({ key: 'activity', isActive: false, element: under('activity', sentence) })
       }
     } else {
-      const label = index === firstUpcoming ? 'Next' : 'Later'
+      const label = index === firstUpcoming ? tr('Next') : tr('Later')
       lines.push({
         key,
         isActive: false,
@@ -4133,17 +4208,17 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         helper.kind === 'background'
           ? /background/i.test(helper.label)
             ? null
-            : 'in the background'
+            : tr('in the background')
           : helper.type === 'general-purpose'
-            ? 'helper'
+            ? tr('helper')
             : helper.type
       const details = (
         isDetailed
           ? [
               kindLabel,
               helper.model,
-              helper.effort ? `${helper.effort} effort` : null,
-              helper.tokens > 0 ? `${formatTokens(helper.tokens)} tokens` : null,
+              helper.effort ? tr('{0} effort', helper.effort) : null,
+              helper.tokens > 0 ? tr('{0} tokens', formatTokens(helper.tokens)) : null,
             ]
           : [kindLabel]
       )
@@ -4161,10 +4236,10 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             kit.blank(),
             <Box flexDirection="row" alignItems="center" gap={1}>
               {isRunning
-                ? kit.ring(null, isCalm ? 0 : tick, 'Running', 13)
+                ? kit.ring(null, isCalm ? 0 : tick, tr('Running'), 13)
                 : helper.status === 'failed'
-                  ? kit.badge('close', 'alert', 'Failed', 13)
-                  : kit.badge('check', 'ok', 'Done', 13)}
+                  ? kit.badge('close', 'alert', tr('Failed'), 13)
+                  : kit.badge('check', 'ok', tr('Done'), 13)}
               <Text wrap="truncate-end">
                 <Text dimColor={!isRunning}>{shown.name}</Text>
                 {shown.tail !== '' && <Text dimColor>{` · ${shown.tail}`}</Text>}
@@ -4210,7 +4285,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   const below = stepsIn(first + shown, lines.length)
   const rows = lines.slice(first, first + shown).map(one => one.element)
   if (above + below > 0 && shown < room) {
-    const more = [above > 0 ? `${above} earlier` : '', below > 0 ? `${below} more ${below === 1 ? 'step' : 'steps'}` : '']
+    const more = [above > 0 ? tr('{0} earlier', above) : '', below > 0 ? (below === 1 ? tr('1 more step') : tr('{0} more steps', below)) : '']
       .filter(Boolean)
       .join(' · ')
     rows.push(
