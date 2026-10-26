@@ -1,11 +1,18 @@
-import type { GlanceChecklist, GlanceHelper, GlanceHistoryView, GlanceOtherChat, GlanceTask, GlanceTaskSize, GlanceUsage } from '../types'
+import type { GlanceCheck, GlanceChecklist, GlanceHelper, GlanceHistoryView, GlanceOtherChat, GlanceTask, GlanceTaskSize, GlanceUsage } from '../types'
 import { SIZE_WEIGHT, teamReport, weekSummary } from './history'
 import { maskPrivate } from './privacy'
+import { currentLang, tr } from './words'
+
+// History reads them too, so they live there.
+export { CHECK_WORDS, jobCheck } from './history'
 
 export const PLUGIN = 'glanceflow'
+// Claude Desktop's own task list and end-of-turn box, from its Code tab's built-in ccd_turn server.
+export const NATIVE_PLAN = 'mcp__ccd_turn__update_plan'
+export const NATIVE_WRAP_UP = 'mcp__ccd_turn__wrap_up'
 
 export const tourNeeds = (mark: string) =>
-  `When Claude needs you, the checklist says Needs you ${mark}, and what to do. Turn on sounds or desktop notices in Settings to hear or see it from another app.`
+  tr('When Claude needs you, the checklist says Needs you {0}, and what to do. Turn on sounds or desktop notices in Settings to hear or see it from another app.', mark)
 
 export const MAX_NAME = 40
 
@@ -35,8 +42,8 @@ export function resetTime(resetsAt: string | null, at: number): string | null {
   const when = resetsAt ? new Date(resetsAt) : null
   if (when === null || Number.isNaN(when.getTime())) return null
   const time = `${pad2(when.getHours())}:${pad2(when.getMinutes())}`
-  if (when.getTime() - at <= 24 * 3_600_000) return `at ${time}`
-  return `on ${when.toLocaleDateString('en-GB', { weekday: 'short' })} at ${time}`
+  if (when.getTime() - at <= 24 * 3_600_000) return tr('at {0}', time)
+  return tr('on {0} at {1}', when.toLocaleDateString(currentLang() === 'el' ? 'el-GR' : 'en-GB', { weekday: 'short' }), time)
 }
 
 /** Turns any step or job name, or a step's summary, into short plain English. */
@@ -48,7 +55,7 @@ export function cleanName(raw: unknown, max = MAX_NAME): string {
     .filter(word => word && !word.includes('•') && !/[/\\]/.test(word) && !CODE_FILE.test(word))
   let name = words.join(' ').replace(/\s+/g, ' ').trim()
   if (!name) {
-    return 'Working on it'
+    return tr('Working on it')
   }
   name = name.charAt(0).toUpperCase() + name.slice(1)
   if (name.length <= max) {
@@ -93,19 +100,20 @@ export function apiErrorSentence(kind: string, details = ''): string {
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000))
   if (seconds < 60) {
-    return `${seconds}s`
+    return tr('{0}s', seconds)
   }
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) {
-    return `${minutes}m ${seconds % 60}s`
+    return tr('{0}m {1}s', minutes, seconds % 60)
   }
 
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  return tr('{0}h {1}m', Math.floor(minutes / 60), minutes % 60)
 }
 
 /** A duration where words flow (the desktop): a whole minute drops its seconds, `1m` rather than `1m 0s`. */
 export function durationWords(ms: number): string {
-  return formatDuration(ms).replace(/^(\d+m) 0s$/, '$1')
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  return seconds >= 60 && seconds < 3600 && seconds % 60 === 0 ? tr('{0}m', seconds / 60) : formatDuration(ms)
 }
 
 /** Terminal cells a character takes: two for CJK and emoji, none for joiners and accents. */
@@ -159,7 +167,7 @@ export function carryTokens(old: GlanceTask[], next: GlanceTask[]): GlanceTask[]
     const same = old.find(before => before.name === one.name && !used.has(before.id))
     if (!same) return one
     used.add(same.id)
-    return { ...one, tokens: same.tokens, cachedTokens: same.cachedTokens, summary: same.summary, files: same.files }
+    return { ...one, tokens: same.tokens, cachedTokens: same.cachedTokens, summary: same.summary, files: same.files, check: same.check }
   })
   const leftover = old.filter(before => !used.has(before.id))
   const [first, ...rest] = carried
@@ -186,9 +194,9 @@ export function formatTokens(count: number): string {
 /** New tokens first (what really counts), then the cheap ones read back from the cache. */
 export function tokenNote(tokens: number, cachedTokens: number): string {
   if (tokens <= 0) return ''
-  if (cachedTokens <= 0) return `${formatTokens(tokens)} tokens`
+  if (cachedTokens <= 0) return tr('{0} tokens', formatTokens(tokens))
 
-  return `${formatTokens(tokens - cachedTokens)} new · ${formatTokens(cachedTokens)} cached`
+  return tr('{0} new · {1} cached', formatTokens(tokens - cachedTokens), formatTokens(cachedTokens))
 }
 
 export function sizeOf(raw: unknown): GlanceTaskSize {
@@ -273,9 +281,9 @@ export const LONG_STEP_REPORT = 90
 
 /** A step's time left: short for the terminal's columns (`<1m left`), in words where text flows (`under a minute left`). */
 export function leftLabel(ms: number | null, isWords = false): string {
-  if (ms === null) return 'taking longer'
-  if (isWords) return ms < 60_000 ? 'under a minute left' : `about ${formatLeft(ms)} left`
-  return ms < 60_000 ? '<1m left' : `~${formatLeft(ms)} left`
+  if (ms === null) return tr('taking longer')
+  if (isWords) return ms < 60_000 ? tr('under a minute left') : tr('about {0} left', formatLeft(ms))
+  return ms < 60_000 ? tr('<1m left') : tr('~{0} left', formatLeft(ms))
 }
 
 /**
@@ -405,7 +413,7 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
   if (tool === 'WebFetch') return 'Reading a web page'
   if (tool === 'WebSearch') return 'Searching the web'
   if (tool === 'Skill') return 'Following a skill'
-  if (tool.startsWith('mcp__') && !tool.startsWith(`mcp__${PLUGIN}__`)) return 'Using a connected app'
+  if (tool.startsWith('mcp__') && !tool.startsWith(`mcp__${PLUGIN}__`) && tool !== NATIVE_PLAN && tool !== NATIVE_WRAP_UP) return 'Using a connected app'
   if (tool === 'Bash' || tool === 'PowerShell') {
     const command = String(input.command ?? '')
     if (/\b(test|tests|jest|vitest|pytest|mocha|playwright|rspec)\b/i.test(command)) return 'Running the tests'
@@ -415,6 +423,115 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
     return 'Running a command'
   }
   return null
+}
+
+// What each activity asks to do, as the words after "OK to"; with a file or site, its name follows.
+const ASKS: Record<string, () => string> = {
+  'Reading files': () => tr('read'),
+  'Searching the project': () => tr('search the project'),
+  'Editing files': () => tr('edit'),
+  'Writing files': () => tr('write'),
+  'Reading a web page': () => tr('read a page on'),
+  'Searching the web': () => tr('search the web'),
+  'Using a connected app': () => tr('use a connected app'),
+  'Running the tests': () => tr('run the tests'),
+  'Installing packages': () => tr('install packages'),
+  'Working with git': () => tr('run a git command'),
+  'Building the project': () => tr('build the project'),
+  'Running a command': () => tr('run a command'),
+}
+
+// What a command does that a person should know before saying yes.
+// shortcut: reads the command's first line as text, as the activity keeps it; add a spelling here when a risky one shows up.
+const RISKS: readonly (readonly [RegExp, () => string])[] = [
+  [/\brm\s+-\w*[rf]|\brmdir\b|\bRemove-Item\b|\bgit\s+clean\b/i, () => tr('deletes files')],
+  [/\bgit\s+(?:reset\s+--hard|push\s+(?:-f\b|--force)|rebase\b)/i, () => tr('rewrites git history')],
+  [/\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bgh\s+release\s+create\b/i, () => tr('publishes a package')],
+  [/\bgit\s+push\b|\bgh\s+pr\s+merge\b/i, () => tr('uploads your changes')],
+  [/\bdeploy\b|\bvercel\b.*--prod/i, () => tr('deploys online')],
+  [/\b(?:npm|pnpm|yarn|bun|pip3?|brew|cargo|gem)\s+(?:install|add|i)\b/i, () => tr('installs packages')],
+  [/\bsudo\b/, () => tr('uses admin rights')],
+  [/\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, () => tr('runs code from the internet')],
+]
+
+/**
+ * What a permission request asks, in plain words: Claude's own description of the call, else what it does and to
+ * what, then anything risky the command does. Null when nothing is known about the call.
+ */
+export function permissionWords(activity: GlanceChecklist['activity']): string | null {
+  if (activity === null) return null
+  const asks = ASKS[activity.label]?.()
+  const isCommand = activity.label.startsWith('Running') || activity.label === 'Installing packages' || activity.label === 'Working with git' || activity.label === 'Building the project'
+  const said = activity.detail?.replace(/[.!]+$/, '') ?? ''
+  // English reads Claude's description after "OK to", in lower case; Greek keeps it as said, as a name.
+  const what = activity.detail
+    ? currentLang() === 'en'
+      ? `${said.charAt(0).toLowerCase()}${said.slice(1)}`
+      : said
+    : asks === undefined
+      ? null
+      : !isCommand && activity.target
+        ? `${asks} ${activity.target}`
+        : asks
+  if (what === null) return null
+  const risks = isCommand && activity.target ? RISKS.filter(([pattern]) => pattern.test(activity.target!)).map(([, words]) => words()) : []
+  const and = risks.length > 1 ? tr('{0} and {1}', risks.slice(0, -1).join(', '), risks[risks.length - 1]!) : (risks[0] ?? '')
+
+  if (activity.detail) return and ? tr('OK to {0}? It {1}.#detail', what, and) : tr('OK to {0}?#detail', what)
+  return and ? tr('OK to {0}? It {1}.', what, and) : tr('OK to {0}?', what)
+}
+
+// A piece that starts with a test, build, type check or lint command, after any VAR=x assignments. Stricter than
+// activityOf's words: git commit -m "fix test", cat tests/x.ts and npm install jest run no check.
+// shortcut: reads the command as text; a check run through a script, an alias or a wrapper like sh -c is not seen,
+// add its spelling here when one shows up.
+const CHECK_COMMAND = new RegExp(
+  '^\\s*(?:\\w+=\\S*\\s+)*(?:' +
+    [
+      '(?:npm|pnpm|yarn|bun)\\s+(?:run\\s+)?(?:test|build|check|typecheck|type-check|lint|verify)',
+      '(?:npx|bunx|pnpm\\s+exec|pnpm\\s+dlx)\\s+(?:jest|vitest|mocha|playwright\\s+test|tsc|eslint)',
+      '(?:jest|vitest|mocha|pytest|rspec|phpunit|tsc)',
+      'python3?\\s+-m\\s+(?:pytest|unittest|mypy)',
+      'go\\s+(?:test|build|vet)',
+      'cargo\\s+(?:test|build|check|clippy)',
+      'make\\s+(?:test|check|build)',
+      '(?:\\.\\/gradlew|gradle)\\s+(?:test|build|check)',
+      'mvn\\s+(?:test|verify|package)',
+      '(?:dotnet|swift)\\s+(?:test|build)',
+      'deno\\s+(?:test|check)',
+      'bundle\\s+exec\\s+rspec',
+      'claude\\s+plugin\\s+(?:test|validate)',
+    ].join('|') +
+    ')(?![\\w-])',
+)
+
+/** Whether a shell command runs the project's tests, build, type check or lint: the outside judge for a step's code. */
+export const runsCheck = (command: string) => commandPieces(command).some(piece => CHECK_COMMAND.test(piece))
+
+// Failure counts, a FAIL line, TypeScript errors or a failed build in the output. `npm test 2>&1 | tail` and `|| true`
+// report the last command's exit code, not the tests', so the output is read too.
+// shortcut: heuristic text matching; a runner that prints failures another way passes, add its wording when seen.
+const CHECK_FAILED = /\b[1-9]\d*\s+(?:fail|failed|failing|failures?|errors?)\b|^\s*FAIL\b|\berror TS\d+|\bBUILD FAILED\b/im
+
+/** What a check command's run says about the code: failed when it errored or its output reports failures. */
+export const checkResult = (isError: boolean, output: string): GlanceCheck =>
+  isError || CHECK_FAILED.test(output) ? 'failed' : 'passed'
+
+/** Whether writing a file changes code a check should cover; prose does not. */
+export const needsCheck = (path: string) => !/\.(?:md|mdx|txt|rst)$/i.test(path)
+
+/** A check's result on each step that changed code; a step that passed keeps it when a later check fails. */
+export const applyCheck = (tasks: GlanceTask[], result: GlanceCheck): GlanceTask[] =>
+  tasks.map(one => (one.check === undefined || (one.check === 'passed' && result === 'failed') ? one : { ...one, check: result }))
+
+/** Whether version `latest` (like 0.27.0) comes after `current`; a part that isn't a number counts as 0. */
+export function isNewerVersion(latest: string, current: string): boolean {
+  const a = latest.split('.').map(part => Number.parseInt(part, 10) || 0)
+  const b = current.split('.').map(part => Number.parseInt(part, 10) || 0)
+  for (let at = 0; at < Math.max(a.length, b.length); at++) {
+    if ((a[at] ?? 0) !== (b[at] ?? 0)) return (a[at] ?? 0) > (b[at] ?? 0)
+  }
+  return false
 }
 
 /** A job's cost in plain dollars: "$0.42", or "<$0.01" for less than a cent. */
@@ -1192,7 +1309,7 @@ export function ownWords(text: string): string {
 export function formatLeft(ms: number): string {
   const minutes = Math.max(1, Math.round(ms / 60000))
 
-  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  return minutes < 60 ? tr('{0}m', minutes) : tr('{0}h {1}m', Math.floor(minutes / 60), minutes % 60)
 }
 
 /** Keeps exactly one active step while any step is unfinished. */
@@ -1249,16 +1366,82 @@ export function todosToTasks(
   ))
 }
 
+const NATIVE_STATUS = ['completed', 'in_progress', 'pending']
+const finished = (one: GlanceTask): GlanceTask => ({ ...one, status: 'done', percent: 100, hasReported: true })
+const isStep = (number: unknown) => Number.isInteger(number) && Number(number) >= 1
+const isItems = (items: unknown): items is { content: string; status: string }[] =>
+  Array.isArray(items) &&
+  items.length > 0 &&
+  items.every(one => typeof one?.content === 'string' && one.content.trim() !== '' && NATIVE_STATUS.includes(String(one.status)))
+
+/**
+ * A call Claude Desktop's own task list reads: valid `items`, `advance`, or step numbers to mark `done` or `start`.
+ * Any one of them, even a move before a list, means that list is this job's plan.
+ */
+export function isNativeCall(input: unknown): boolean {
+  const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
+  if (call.items !== undefined) return isItems(call.items)
+  if (call.advance === true) return true
+  if (call.done === undefined && call.start === undefined) return false
+  return (call.done === undefined || (Array.isArray(call.done) && call.done.every(isStep))) && (call.start === undefined || isStep(call.start))
+}
+
+/** The question Claude Desktop's end-of-turn box asks the person (wrap_up's `ask`), as one plain line, or null. */
+export function nativeAsk(input: unknown): string | null {
+  const ask = ((input ?? {}) as { ask?: unknown }).ask
+  if (typeof ask !== 'string') return null
+  const line = maskPrivate(ask.replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim())
+
+  return line === '' ? null : line.length > MAX_QUESTION ? `${line.slice(0, MAX_QUESTION - 1)}…` : line
+}
+
+/**
+ * Claude Desktop's own task list call as checklist steps: a new list of `items`, `advance` to the next step, or the
+ * steps now `done` and the one to `start`, counted from 1. Moves count only on a list it has seen (`isNative`).
+ * null when the input reads as none of these, so the checklist stays as it was.
+ */
+export function nativePlan(input: unknown, previous: GlanceTask[], isNative: boolean): GlanceTask[] | null {
+  const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
+  if (call.items !== undefined) return isItems(call.items) ? todosToTasks(call.items, previous) : null
+  if (!isNative) return null
+  if (call.advance === true) {
+    const active = previous.findIndex(one => one.status === 'active')
+    return active === -1 ? null : settle(previous.map((one, index) => (index === active ? finished(one) : one)))
+  }
+  if (call.done === undefined && call.start === undefined) return null
+  const at = (number: unknown) => (Number.isInteger(number) && Number(number) >= 1 && Number(number) <= previous.length ? Number(number) - 1 : null)
+  const done = call.done === undefined ? [] : Array.isArray(call.done) ? call.done.map(at) : [null]
+  const start = call.start === undefined ? undefined : at(call.start)
+  if (done.includes(null) || start === null) return null
+
+  return settle(
+    previous.map((one, index) =>
+      done.includes(index)
+        ? finished(one)
+        : index === start
+          ? { ...one, status: 'active' as const }
+          : start !== undefined && one.status === 'active'
+            ? { ...one, status: 'upcoming' as const }
+            : one,
+    ),
+  )
+}
+
 /** What the notice says under its title: why Claude waits or is stuck, or the job's name. */
 export const noticeBody = (list: GlanceChecklist) =>
-  (list.phase === 'needsYou' ? needsText(list) : list.phase === 'stuck' ? list.stuckReason : null) ?? list.title
+  (list.phase === 'needsYou' ? needsText(list) : list.phase === 'stuck' && list.stuckReason !== null ? tr(list.stuckReason) : null) ?? list.title
 
 /** A job that ended: All done, or finished with a question for the person (Needs you, with a finish time). */
 export const isFinished = (list: GlanceChecklist) => list.phase === 'done' || (list.phase === 'needsYou' && list.finishedAt !== null)
 
-/** Why the person is needed: what Claude asked, when it ended on a question, else the general reason. */
-export const needsText = (list: GlanceChecklist) =>
-  (list.question && (list.needsYouReason === WAITING || list.needsYouReason === QUESTION) ? list.question : list.needsYouReason) ?? null
+/**
+ * Why the person is needed, in their language: what Claude asked, when it ended on a question, else the general reason.
+ * Reasons are kept in English, which the checks compare; they are translated only here, as they are shown.
+ */
+export const needsText = (list: GlanceChecklist) => {
+  const reason = list.question && (list.needsYouReason === WAITING || list.needsYouReason === QUESTION) ? list.question : list.needsYouReason
+  return reason ? tr(reason) : null
+}
 
 export const reportOf = (view: GlanceHistoryView) =>
   view.reportSpan === 'mine'
@@ -1305,10 +1488,10 @@ export function otherChats(saved: readonly (SavedChecklist | undefined)[], at: n
 export function otherChatsWords(others: readonly GlanceOtherChat[]): string[] {
   const waiting = others.filter(one => one.needsYou)
   const working = others.length - waiting.length
-  if (waiting.length === 0) return working === 0 ? [] : [`${working === 1 ? '1 other chat' : `${working} other chats`} at work`]
+  if (waiting.length === 0) return working === 0 ? [] : [working === 1 ? tr('1 other chat at work') : tr('{0} other chats at work', working)]
   const first =
     waiting.length === 1
-      ? `Another chat needs you: ${waiting[0]?.title ?? ''}`
-      : `${waiting.length} other chats need you: ${waiting.map(one => one.title).join(', ')}`
-  return [first, ...(working === 0 ? [] : [`${working} more at work`])]
+      ? tr('Another chat needs you: {0}', waiting[0]?.title ?? '')
+      : tr('{0} other chats need you: {1}', waiting.length, waiting.map(one => one.title).join(', '))
+  return [first, ...(working === 0 ? [] : [tr('{0} more at work', working)])]
 }

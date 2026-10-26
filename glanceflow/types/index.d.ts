@@ -22,7 +22,19 @@ export type GlanceTask = {
   finishedAt: number | null
   /** Files Claude wrote or edited during the step; absent on steps saved before 0.20. */
   files?: GlanceFile[]
+  /** Whether a test, build or type check passed after the step last changed code; absent while it changed none. */
+  check?: GlanceCheck
 }
+
+/** Checking for and installing a newer GlanceFlow: the newest version found, and the install it was found for (`glanceflow@marketplace`). */
+export type GlanceUpdate = {
+  state: 'idle' | 'checking' | 'latest' | 'available' | 'updating' | 'updated' | 'folder' | 'failed'
+  latest: string | null
+  id: string | null
+}
+
+/** A step's code: checked by a test, build or type check that passed, one that failed, or not checked since it changed. */
+export type GlanceCheck = 'passed' | 'failed' | 'unchecked'
 
 /** A file Claude wrote or edited: its path within the project (just its name outside it), and whether the step created it. */
 export type GlanceFile = { path: string; isNew: boolean }
@@ -45,6 +57,8 @@ export type GlanceHelper = {
   /** How hard it thinks (low to max); null until known or for a model without effort. */
   effort: string | null
   status: 'running' | 'done' | 'failed'
+  /** A helper Claude started to work in the background: its Stop ends it alone. */
+  isBackground?: boolean
   /** Tokens this helper's own model requests handled. */
   tokens: number
 }
@@ -60,8 +74,12 @@ export type GlanceChecklist = {
   startedAt: number
   finishedAt: number | null
   isCollapsed: boolean
-  /** True once Claude laid out a real plan (plan_steps, TodoWrite or TaskCreate). */
+  /** True once Claude laid out a real plan (plan_steps, TodoWrite, TaskCreate or Claude Desktop's own task list). */
   hasPlan: boolean
+  /** True once Claude Desktop's own task list laid out this job's steps: that list is the plan, and the band folds it. */
+  isNative?: boolean
+  /** True once this job made any call Claude Desktop's own task list reads, even a move before its steps: no plan_steps. */
+  hasNativeList?: boolean
   /** The turn that started this job; a late job name for another job is ignored. */
   jobId: string
   /** When the real plan arrived; the time-left estimate counts from here. */
@@ -91,6 +109,14 @@ export type GlanceChecklist = {
   costAtStart: number | null
   /** How long one unit of step size took in this project's earlier finished jobs, in ms; null until History knows. */
   paceMs: number | null
+  /** What will be true when the job is done, and what will show it, as Claude said in its plan. */
+  doneWhen?: string | null
+  /** The person's standing goal for this project when the job started (`/glanceflow goal`). */
+  goal?: string | null
+  /** What only the person can do or decide, as Claude reported it: a sign-in, a key, a choice, a step it couldn't run. */
+  forYou?: string[]
+  /** Choices Claude made that neither the plan nor the person settled. */
+  decided?: string[]
 }
 
 /** One plan window and how much of it is used. */
@@ -156,6 +182,12 @@ export type GlanceHistoryEntry = {
   /** Size units of the steps it checked off (S 1, M 2, L 3), and the time they took in ms: the project's pace. */
   doneUnits?: number
   doneMs?: number
+  /** Whether the code it changed was checked: the worst of its steps; absent when it changed no code. */
+  check?: GlanceCheck | null
+  doneWhen?: string | null
+  goal?: string | null
+  forYou?: string[]
+  decided?: string[]
 }
 
 /** What the history pane shows: one day of one project. */
@@ -188,6 +220,8 @@ declare module 'claude-code' {
       historyView: GlanceHistoryView | null
       /** The Fresh chat button: `working` while the handoff note is written. */
       handoffState: 'idle' | 'working'
+      /** Settings' Version row: where checking for an update, or installing one, stands. */
+      update: GlanceUpdate
       /** The button that waits for a second press to confirm, if any. */
       armedButton: 'handoff' | 'ship' | null
       /** Alerts: `chime` plays a short sound when Claude needs you, gets stuck or finishes a long job; `voice` also says it. */
@@ -216,6 +250,8 @@ declare module 'claude-code' {
       otherChats: GlanceOtherChat[]
       /** Whether the band names the other chats at all: off before sharing the screen, say. */
       showsOthers: boolean
+      /** The language GlanceFlow speaks: English, or Greek. */
+      language: 'en' | 'el'
     }
   }
 }

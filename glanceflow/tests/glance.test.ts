@@ -5,8 +5,9 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, askedMergeSha, decodeEscapes, hasMergeRoute, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
+import { GREEK } from '../hooks/words'
 
 const PLAN = 'mcp__glanceflow__plan_steps'
 const PROGRESS = 'mcp__glanceflow__report_progress'
@@ -4135,6 +4136,82 @@ test('a finished job keeps the size and time of its steps, so the next job learn
   expect(saved[0]?.doneMs).toBe(5 * 60_000)
 })
 
+test("a new job starts without reading History: the project's pace is learned once and again only after a job that changes it", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const store = new Map<string, unknown>([['history:2026-10-05', [pastJob('a', '/work/landing-site', 4, 240_000), pastJob('b', '/work/landing-site', 4, 240_000)]]])
+  let historyReads = 0
+  on('store.get', (_, e) => {
+    if (e.key.startsWith('history:')) historyReads += 1
+    return { value: store.get(e.key) } as never
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined } as never
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  on('session.cwd', () => ({ value: '/work/landing-site' }) as never)
+  on('session.id', () => ({ value: 'chat-1' }) as never)
+  on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: {} } as never }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('tool.call', () => ({ result: {} as never }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  // A planned job that finishes with timed steps, a quick answer with no plan, or a planned job left open.
+  const job = async (turnId: string, kind: 'finished' | 'quick' | 'open') => {
+    await $.turn.start({ text: `Build my landing page ${turnId}`, turnId })
+    let shown = ''
+    if (kind !== 'quick') {
+      await callTool($, { tool: PLAN, steps: ['Read notes', 'Write copy', 'Add form', 'Polish it'], sizes: ['S', 'M', 'M', 'L'] })
+      shown = (await texts($, 'terminal')).join('\n')
+    }
+    if (kind === 'finished') {
+      for (const task of ['Read notes', 'Write copy', 'Add form', 'Polish it']) {
+        await clock.advance(60_000)
+        await callTool($, { tool: PROGRESS, task, percent: 100 })
+      }
+    }
+    await $.turn.complete({ turnId } as never)
+    return shown
+  }
+
+  // The first job shows at once and gets the pace as soon as History is read: 8 units at 1 minute a unit.
+  expect(await job('t1', 'finished')).toContain('about 8m left')
+  expect(historyReads).toBeGreaterThan(0)
+  // t1 finished with timed steps, so t2 learns the pace again. t2, a quick answer, doesn't change it, so t3 reads
+  // only its own day, to record itself.
+  historyReads = 0
+  await job('t2', 'quick')
+  expect(historyReads).toBeGreaterThan(1)
+  historyReads = 0
+  expect(await job('t3', 'open')).toMatch(/about \d+m left/)
+  expect(historyReads).toBe(1)
+})
+
+test('the request Haiku names a job from is masked first', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Notification', () => ({}) as never)
+  let asked = ''
+  on('model.complete', (_, e) => {
+    asked = String((e as { prompt?: string }).prompt ?? '')
+    return { value: { isAnswered: true, text: 'Email the invoice', usage: {} } } as never
+  })
+  await $.turn.start({ text: `Email jane@example.com the invoice, the password is ${SAMPLE_PASSWORD}`, turnId: 't1' })
+  // The job is named in the background.
+  await clock.advance(1)
+  expect(asked).toContain('the invoice')
+  expect(asked).not.toContain('jane@example.com')
+  expect(asked).not.toContain(SAMPLE_PASSWORD)
+})
+
 test("a finished step's summary shows under it until Claude moves on, and code stays out of it", async ($, on) => {
   world(on)
   await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
@@ -4388,6 +4465,38 @@ test('with Approve the plan first on, Claude waits for Start before it works', a
   expect(shown).toContain('Write the page')
 })
 
+test('Aim higher asks Claude for a deeper plan, and the new plan still waits for Start', async ($, on) => {
+  world(on)
+  let sent = ''
+  on('prompt.submit', (_, e) => {
+    sent = e.text
+    return { text: e.text }
+  })
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('✦ Aim higher')
+  // Start stays the main button, and last.
+  const buttons = (await texts($, 'desktop')).filter(one => one === 'Aim higher' || one === 'Start')
+  expect(buttons).toEqual(['Aim higher', 'Start'])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'aim' })
+  await ui.unmount()
+  expect(sent).toStartWith('Aim higher: I want a deeper version of this job, not a bigger one.')
+  expect(sent).toContain('done_when')
+
+  // The same job goes on; Claude's new plan waits for Start again.
+  await $.turn.start({ text: sent, turnId: 't2' })
+  const replanned = await callTool($, { tool: PLAN, steps: ['Read the raw analytics', 'Write the page', 'Test it on a phone'] })
+  expect(String(replanned.result)).toContain('wait for their reply')
+  expect((await callTool($, { tool: 'Bash', command: 'ls' })).deny).toContain('not approved')
+  expect((await texts($, 'terminal')).join('\n')).toContain('▶ Start')
+  // Same job: the plan grew rather than started over.
+  expect(await planPaneTexts($)).toContain('plan grew 2 → 3')
+})
+
 test('with Approve the plan first on, a plan Claude makes with its own task list also waits for Start', async ($, on) => {
   world(on)
   await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
@@ -4441,6 +4550,236 @@ test('each step shows the files Claude added or changed, in the Plan and in Hist
   ).toBe('Changed app/page.tsx, pricing/page.tsx, a.css, b.css and 1 more')
   expect(filesNote([{ path: 'notes.md', isNew: true }])).toBe('Added notes.md')
   expect(filesNote([])).toBe('')
+})
+
+test('a check command is a test, build or type check that runs, not one that is only mentioned', () => {
+  for (const command of ['npm test', 'cd x && pnpm run build', 'CI=1 npx vitest run', 'go test ./...', 'npm test 2>&1 | tail -5', 'claude plugin test glanceflow'])
+    expect(runsCheck(command)).toBe(true)
+  for (const command of ['git commit -m "fix test"', 'cat tests/a.ts', 'npm install jest', 'echo npm test', 'ls'])
+    expect(runsCheck(command)).toBe(false)
+
+  expect(checkResult(true, '')).toBe('failed')
+  // Piped through tail, the exit code is tail's: the output tells.
+  expect(checkResult(false, 'Tests: 3 failed, 12 passed')).toBe('failed')
+  expect(checkResult(false, 'src/a.ts(3,1): error TS2304: Cannot find name')).toBe('failed')
+  expect(checkResult(false, ' 203 pass\n 0 fail')).toBe('passed')
+  expect(needsCheck('README.md')).toBe(false)
+  expect(needsCheck('src/a.ts')).toBe(true)
+
+  const step = (check?: 'passed' | 'failed' | 'unchecked') => ({ ...carryTokens([], [])[0], id: String(check), check }) as never
+  const checked = applyCheck([step(), step('passed'), step('unchecked')], 'failed')
+  expect(checked.map(one => one.check)).toEqual([undefined, 'passed', 'failed'])
+  expect(jobCheck(checked)).toBe('failed')
+  expect(jobCheck([step(), step('passed')])).toBe('passed')
+  expect(jobCheck([step()])).toBeNull()
+})
+
+test('a finished job says whether the code it changed was tested, by the tests run, not by Claude', async ($, on) => {
+  // What the shell answers; every other tool succeeds.
+  let answer: unknown = { result: {}, text: ' 203 pass\n 0 fail' }
+  world(on, ((_: unknown, e: { tool: string }) => (e.tool === 'Bash' ? answer : { result: {} })) as never)
+  let turn = 0
+  const job = async (work: () => Promise<unknown>) => {
+    turn += 1
+    await $.turn.start({ text: `Fix the sign-up bug ${turn}`, turnId: `t${turn}` })
+    await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+    await work()
+    await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+    await callTool($, { tool: PROGRESS, task: 'Check it', percent: 100 })
+    await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: `t${turn}`, reason: 'answer' })
+    return (await texts($, 'terminal')).find(line => line.startsWith('✓ All done')) ?? ''
+  }
+  const edit = (path: string) => callTool($, { tool: 'Edit', file_path: path, old_string: 'a', new_string: 'b' })
+  const bash = (command: string) => callTool($, { tool: 'Bash', command })
+
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toMatch(/ · tested · took /)
+  expect((await texts($, 'desktop')).join('\n')).toMatch(/Fix the sign-up bug 1 · tested · took /)
+  // An edit after the tests passed is untested again.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test'), await edit('/work/src/a.ts')))).toContain(' · not tested · ')
+  // A command that only mentions tests checks nothing.
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('git commit -m "fix test"')))).toContain(' · not tested · ')
+  answer = { isError: true, result: 'x', text: '1 failed' }
+  expect(await job(async () => (await edit('/work/src/a.ts'), await bash('npm test')))).toContain(' · tests failed · ')
+  // Prose needs no test.
+  answer = { result: {}, text: '' }
+  const prose = await job(() => edit('/work/README.md'))
+  expect(prose).toContain('✓ All done')
+  expect(prose).not.toMatch(/tested|tests failed/)
+  // The person saying no at the permission dialog says nothing about the code; the Plan shows each step's check.
+  answer = { isError: true, result: 'x', text: "The user doesn't want to proceed with this tool use." }
+  await $.turn.start({ text: 'Fix the login bug', turnId: 'tn' })
+  await callTool($, { tool: PLAN, steps: ['Fix the bug', 'Check it'] })
+  await edit('/work/src/a.ts')
+  await bash('npm test')
+  await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
+  expect(await planPaneTexts($)).toContain(' took 0s · not tested')
+})
+
+test('a plan says what done looks like, in the Plan and in the Team report, beside whether it was tested', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  const doneWhen = 'The sign-up tests pass and the form works on a phone'
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'], done_when: doneWhen })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+  // A new plan that leaves it out keeps it.
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests', 'Try it on a phone'] })
+  expect(await planPaneTexts($)).toContain(`Done when: ${doneWhen}`)
+
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests', 'Try it on a phone']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/• Fix the sign-up form \(.*\) · tested\n  Done when: The sign-up tests pass and the form works on a phone\n/)
+})
+
+test('/glanceflow goal sets a standing goal for the project: Claude plans toward it, and the Plan and Team report show it', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  let copied = ''
+  on('ui.copy', (_, e) => {
+    copied = e.text
+    return { value: { isCopied: true } } as never
+  })
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const goalSection = async () => {
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    return (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:goal')?.text
+  }
+  const goal = (args: string) => $.command.run({ command: 'glanceflow', args } as never).then(one => String(one.text))
+
+  expect(await goal('goal')).toContain('No goal for this project yet')
+  expect(await goalSection()).toBeUndefined()
+  // The goal keeps the person's own capitals.
+  expect(await goal('goal Keep sign-ups working on every phone')).toContain('Keep sign-ups working on every phone')
+  expect(await goal('goal')).toContain('The goal for this project: Keep sign-ups working on every phone')
+  expect(await goalSection()).toContain("# The person's standing goal for this project\nKeep sign-ups working on every phone\nPlan each job toward it")
+
+  await $.turn.start({ text: 'Fix the sign-up form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Fix the form', 'Run the tests'] })
+  expect(await planPaneTexts($)).toContain('Goal: Keep sign-ups working on every phone')
+  await callTool($, { tool: 'Edit', file_path: '/work/landing-site/src/form.ts', old_string: 'a', new_string: 'b' })
+  await callTool($, { tool: 'Bash', command: 'npm test' })
+  for (const task of ['Fix the form', 'Run the tests']) await callTool($, { tool: PROGRESS, task, percent: 100 })
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'report' })
+  await ui.unmount()
+  expect(copied).toMatch(/^Daily update · landing-site · .*\nGoal: Keep sign-ups working on every phone · 1 task, 1 finished, 1 tested\n\nDone\n/)
+
+  expect(await goal('goal off')).toContain('cleared')
+  expect(await goalSection()).toBeUndefined()
+})
+
+test('Settings shows the version, checks for a newer one when asked, and installs it', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  // The install as Claude Code reports it, and the newest GlanceFlow in its marketplace.
+  const install = { id: 'glanceflow@claude-mods', scope: 'user', enabled: true, installPath: '/cache/claude-mods/glanceflow/0.26.0' }
+  const newest = '0.27.0'
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: readonly string[] }).argv
+    ran.push(argv.join(' '))
+    const out = (stdout: unknown) => ({ value: { exitCode: 0, stdout: JSON.stringify(stdout), stderr: '' } }) as never
+    if (argv.join(' ') === 'claude plugin list --json') return out([install])
+    if (argv.join(' ') === 'claude plugin list --available --json') return out({ installed: [install], available: [{ pluginId: install.id, source: './glanceflow' }] })
+    if (argv.join(' ') === 'claude plugin marketplace list --json') return out([{ name: 'claude-mods', installLocation: '/markets/claude-mods' }])
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('fs.read', (_, e) => ({ value: JSON.stringify({ version: e.path.startsWith('/markets/') ? newest : '0.26.0' }) }) as never)
+  const shown = async () => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    const words = [...(await ui.findAll({ type: 'Text' })), ...(await ui.findAll({ type: 'Button' }))].map(one => one.text).join('\n')
+    await ui.unmount()
+    return words
+  }
+  const press = async (key: string) => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    await ui.press({ key })
+    await ui.unmount()
+  }
+
+  // Nothing runs until the person asks.
+  let words = await shown()
+  expect(words).toContain('GlanceFlow 0.26.0.')
+  expect(words).toContain('Check for updates')
+  expect(ran).toEqual([])
+
+  await press('update')
+  expect(ran).toContain('claude plugin marketplace update claude-mods')
+  words = await shown()
+  expect(words).toContain('GlanceFlow 0.27.0 is out.')
+  expect(words).toContain('Update to 0.27.0')
+
+  await press('update')
+  expect(ran).toContain('claude plugin update glanceflow@claude-mods')
+  words = await shown()
+  expect(words).toContain('GlanceFlow 0.27.0 is installed. Open a new chat to use it.')
+  expect(words).not.toContain('Update to')
+})
+
+test('Version: the newest is said plainly, a copy run from a folder is not updated from a marketplace, and a failure gives the command', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  let id = 'glanceflow@claude-mods'
+  let isBroken = false
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: readonly string[] }).argv
+    ran.push(argv.join(' '))
+    if (isBroken) throw new Error('claude: not found')
+    const out = (stdout: unknown) => ({ value: { exitCode: 0, stdout: JSON.stringify(stdout), stderr: '' } }) as never
+    if (argv.join(' ') === 'claude plugin list --json') return out([{ id, scope: 'user', enabled: true, installPath: '/somewhere' }])
+    if (argv.join(' ') === 'claude plugin list --available --json') return out({ installed: [], available: [{ pluginId: id, version: '0.26.0' }] })
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('fs.read', () => ({ value: JSON.stringify({ version: '0.26.0' }) }) as never)
+  const check = async () => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    await ui.press({ key: 'update' })
+    await ui.unmount()
+    const again = await $.ui.mount({ ...SETTINGS, surface: 'terminal' })
+    const words = [...(await again.findAll({ type: 'Text' })), ...(await again.findAll({ type: 'Button' }))].map(one => one.text).join('\n')
+    await again.unmount()
+    return words
+  }
+
+  let words = await check()
+  expect(words).toContain('You have the newest version.')
+  expect(words).not.toContain('Update to')
+
+  isBroken = true
+  words = await check()
+  expect(words).toContain("Couldn't check or update from here. In a terminal, run: claude plugin update glanceflow@claude-mods")
+  expect(words).toContain('Check again')
+
+  // A copy loaded from a folder updates where it lives: no marketplace fetch, and no button to press again.
+  isBroken = false
+  id = 'glanceflow@inline'
+  ran.length = 0
+  words = await check()
+  expect(words).toContain('runs from a folder')
+  expect(words).not.toContain('Check again')
+  expect(ran.some(one => one.includes('marketplace update'))).toBe(false)
+
+  expect(isNewerVersion('0.27.0', '0.26.0')).toBe(true)
+  expect(isNewerVersion('0.26.10', '0.26.9')).toBe(true)
+  expect(isNewerVersion('1.0.0', '0.99.9')).toBe(true)
+  expect(isNewerVersion('0.26.0', '0.26.0')).toBe(false)
+  expect(isNewerVersion('0.25.3', '0.26.0')).toBe(false)
 })
 
 /** The same world as `world`, with the clock and a store the test can read, starting with `entries`. */
@@ -5056,4 +5395,596 @@ test("two chats saving jobs the same day keep both; the day's old shared key mov
   expect(shown).toContain('Saved before 0.25')
   expect(shown).toContain('Saved by another chat')
   expect(shown).toContain('Build the pricing section')
+})
+
+test('in VS Code, which draws no band above the prompt, the checklist opens in a pane', async ($, on) => {
+  world(on)
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push((e as { id: string }).id)
+    return { value: { isPlaced: true } } as never
+  })
+  on('session.attach', (_, e) => ({ clientId: e.clientId }) as never)
+
+  await $.session.attach({ surface: 'vscode', clientId: 'vscode:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+  // A terminal or the desktop app has the band: no pane there.
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(opened).toEqual(['glanceflow-checklist'])
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the page', 'Check it'] })
+  const ui = await $.ui.mount({
+    plugin: 'glanceflow',
+    component: 'Pane',
+    requestId: 'glanceflow-checklist',
+    surface: 'vscode',
+    props: { title: 'GlanceFlow', isFocused: false, bodyColumns: 60, placement: 'inline', scroll: { offset: 0, bodyRows: 12 }, view: {} },
+  })
+  const shown = (await ui.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  const buttons = (await ui.findAll({ type: 'Button' })).map(one => one.text).join('\n')
+  await ui.unmount()
+  expect(shown).toContain('Write the page')
+  expect(shown).toContain('Check it')
+  expect(buttons).toContain('Settings')
+
+  // Closed by the person, it comes back with /glanceflow show.
+  const reply = await $.command.run({ command: 'glanceflow', args: 'show' } as never)
+  expect(opened).toEqual(['glanceflow-checklist', 'glanceflow-checklist'])
+  expect(JSON.stringify(reply)).toContain('checklist is open')
+})
+
+test("notices go through Claude Code first, so the person's Notification hooks reach them away from the computer", async ($, on) => {
+  const { clock } = soundWorld(on)
+  on('classic.StopFailure', () => ({}) as never)
+  const ran: string[] = []
+  on('process.run', (_, e) => {
+    ran.push((e as { argv: readonly string[] }).argv[0] ?? '')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  const notified: { text: string; title?: string }[] = []
+  let answer: unknown = { isSent: true, channel: 'iterm2' }
+  on('ui.notify', (_, e) => {
+    notified.push({ text: e.text, title: e.title })
+    return { value: answer } as never
+  })
+  await $.command.run({ command: 'glanceflow', args: 'notify on' } as never)
+  await clock.advance(1)
+  notified.length = 0
+  ran.length = 0
+
+  // Claude Code's channel showed it (and the hooks ran): no second notice from the computer.
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write it', 'Check it'] })
+  await $.classic.StopFailure({ error: 'overloaded_error', error_details: '' } as never)
+  await clock.advance(1)
+  expect(notified.map(one => one.title)).toEqual(['Claude is stuck'])
+  expect(notified[0]?.text).toBeTruthy()
+  expect(ran.filter(one => one === 'osascript' || one === 'notify-send')).toEqual([])
+
+  // No text where the person looks (the Desktop app, a bare bell): the computer's own notice shows it too.
+  for (const reply of [{ isSent: false, reason: 'no-surface' }, { isSent: true, channel: 'terminal_bell' }]) {
+    answer = reply
+    notified.length = 0
+    ran.length = 0
+    await $.turn.start({ text: 'Try again', turnId: `t-${notified.length}-${String(reply.isSent)}` })
+    await callTool($, { tool: PLAN, steps: ['Write it'] })
+    await $.classic.Notification({ message: 'Claude needs your permission', notification_type: 'permission_prompt' } as never)
+    await clock.advance(1)
+    expect(notified.map(one => one.title)).toEqual(['Claude needs you'])
+    expect(ran).toContain('osascript')
+  }
+
+  // Claude Code hears a mod's notice again as a plugin_notification: that is not Claude needing the person.
+  notified.length = 0
+  await $.turn.start({ text: 'One more', turnId: 't9' })
+  await callTool($, { tool: PLAN, steps: ['Write it'] })
+  await $.classic.Notification({ message: 'Claude is stuck', notification_type: 'plugin_notification' } as never)
+  await clock.advance(1)
+  expect(notified).toEqual([])
+})
+
+test("in plan mode the plan the person approves in Claude Code is the checklist, with no plan of the planning and no second approval", async ($, on) => {
+  world(on)
+  on('classic.UserPromptSubmit', () => ({}) as never)
+  await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'Add a subtract function', permission_mode: 'plan' } as never)
+  await $.turn.start({ text: 'Add a subtract function', turnId: 't1' })
+
+  // Claude looks around and writes the plan, with no checklist of the planning itself.
+  const looked = await callTool($, { tool: 'Read', file_path: '/work/calc.py' })
+  expect(looked.deny).toBeUndefined()
+  const meta = await callTool($, { tool: PLAN, steps: ['Look at the code', 'Write the plan'] })
+  expect(meta.deny).toContain('Plan mode')
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('Look at the code')
+
+  // The person approves the plan in Claude Code: its steps become the checklist, and the work starts at once.
+  const handed = await callTool($, { tool: 'ExitPlanMode' })
+  expect(handed.deny).toBeUndefined()
+  const planned = await callTool($, { tool: PLAN, steps: ['Add the subtract function', 'Test both functions'] })
+  expect(String(planned.result)).not.toContain('wait for their reply')
+  const ran = await callTool($, { tool: 'Edit', file_path: '/work/calc.py', old_string: 'a', new_string: 'b' })
+  expect(ran.deny).toBeUndefined()
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('Add the subtract function')
+  expect(shown).not.toContain('▶ Start')
+
+  // The next prompt, out of plan mode, plans and waits for Start as before.
+  await $.classic.UserPromptSubmit({ prompt: 'Now a multiply function', permission_mode: 'default' } as never)
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Now a multiply function', turnId: 't2' })
+  const next = await callTool($, { tool: PLAN, steps: ['Add multiply', 'Test it'] })
+  expect(String(next.result)).toContain('wait for their reply')
+})
+
+test('in the Plan, a helper opens in the main view, and one working in the background stops alone', async ($, on) => {
+  const stopped: string[] = []
+  world(on, ((_: unknown, e: { tool?: string; task_id?: unknown }) => {
+    if (e.tool === 'TaskStop') stopped.push(String(e.task_id))
+    return { result: {} }
+  }) as never)
+  on('classic.Stop', () => ({}) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  // The CI's Claude Code (2.1.296) predates ui.view, so no hook answers it here: Open says why it couldn't, never fails.
+  let next = 'a1'
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: next }) as never)
+  const spawn = (description: string, background: boolean) =>
+    $.agent.spawn({
+      tool_use_id: `tu-${description}`,
+      prompt: description,
+      description,
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background,
+      fork: false,
+    } as never)
+
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Look around the project', 'Write the page'] })
+  await spawn('Find the pricing data', false)
+  next = 'a2'
+  await spawn('Check the old page', true)
+  await $.turn.complete({ answer: 'Working on it.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'Run the dev server' }] } as never)
+
+  for (const surface of SURFACES) {
+    const plan = await $.ui.mount({ ...PLAN_PANE, surface })
+    const buttons = (await plan.findAll({ type: 'Button' })).map(one => String(one.props.key))
+    // A helper in the foreground opens; Esc stops it with Claude. One in the background also stops; a shell task only stops.
+    expect(buttons).toContain('open-a1')
+    expect(buttons).not.toContain('stop-a1')
+    expect(buttons).toContain('open-a2')
+    expect(buttons).toContain('stop-a2')
+    expect(buttons).not.toContain('open-bg:b1')
+    expect(buttons).toContain('stop-bg:b1')
+    if (surface === 'terminal') {
+      await plan.press({ key: 'open-a1' })
+      await plan.press({ key: 'stop-a2' })
+      await plan.press({ key: 'stop-bg:b1' })
+    }
+    await plan.unmount()
+  }
+  expect(stopped).toEqual(['a2', 'b1'])
+})
+
+test('what only the person can do, and what Claude decided on its own, show in the band, the Plan and the team report', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.turn.start({ text: 'Add divide and publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Add divide', 'Test it', 'Publish it'] })
+  await callTool($, { tool: PROGRESS, task: 'Add divide', percent: 100, summary: 'Added division.', decided: ['Dividing by zero raises the usual error'] })
+  await callTool($, { tool: PROGRESS, task: 'Test it', percent: 100, for_you: ['Run the tests yourself: running Python was declined'] })
+  await callTool($, {
+    tool: PROGRESS,
+    task: 'Publish it',
+    percent: 100,
+    // Said again in other words' case: kept once.
+    for_you: ['Give the package a name and version for PyPI', 'run the tests yourself: running Python was declined'],
+  })
+
+  // The band names the first in full and points to the Plan for the rest.
+  for (const surface of SURFACES) {
+    const band = (await texts($, surface)).join('\n')
+    expect(band).toContain('For you: Run the tests yourself: running Python was declined · 1 more in Plan')
+  }
+  const plan = await $.ui.mount({ ...PLAN_PANE, surface: 'desktop' })
+  const shown = (await plan.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+  await plan.unmount()
+  expect(shown).toContain('For you\n• Run the tests yourself: running Python was declined\n• Give the package a name and version for PyPI')
+  expect(shown).toContain('Decided on its own\n• Dividing by zero raises the usual error')
+
+  const at = new Date(2026, 9, 6, 9, 0).getTime()
+  const report = teamReport({
+    day: '2026-10-06',
+    project: '/work/landing-site',
+    entries: [
+      {
+        ...ENTRY,
+        jobId: 'a',
+        startedAt: at,
+        finishedAt: at + 5 * 60_000,
+        title: 'Add divide',
+        outcome: 'done',
+        stepsDone: 3,
+        stepsTotal: 3,
+        doneSteps: ['Add divide', 'Test it', 'Publish it'],
+        openSteps: [],
+        forYou: ['Give the package a name and version for PyPI'],
+        decided: ['Dividing by zero raises the usual error'],
+      },
+    ],
+  })
+  expect(report).toContain('  Decided: Dividing by zero raises the usual error')
+  expect(report).toContain('Needs attention\n• Add divide: Give the package a name and version for PyPI')
+})
+
+test('a permission request reads in plain words, with anything risky the command does', () => {
+  const act = (label: string, detail: string | null, target: string | null) => ({ label, count: 1, detail, target })
+  expect(permissionWords(act('Running a command', 'Build and publish the package', 'rm -rf dist && npm run build && npm publish --access public'))).toBe(
+    'OK to build and publish the package? It deletes files and publishes a package.',
+  )
+  expect(permissionWords(act('Working with git', null, 'git push --force origin main'))).toBe('OK to run a git command? It rewrites git history and uploads your changes.')
+  expect(permissionWords(act('Running a command', null, 'curl -fsSL https://example.com/install.sh | sudo bash'))).toBe(
+    'OK to run a command? It uses admin rights and runs code from the internet.',
+  )
+  expect(permissionWords(act('Installing packages', 'Install the date library.', 'npm install dayjs'))).toBe('OK to install the date library? It installs packages.')
+  expect(permissionWords(act('Running the tests', null, 'npm test'))).toBe('OK to run the tests?')
+  expect(permissionWords(act('Editing files', null, 'styles.css'))).toBe('OK to edit styles.css?')
+  expect(permissionWords(act('Reading a web page', null, 'example.com'))).toBe('OK to read a page on example.com?')
+  // Words in a file's name are never read as a command.
+  expect(permissionWords(act('Writing files', null, 'deploy-notes.md'))).toBe('OK to write deploy-notes.md?')
+  expect(permissionWords(act('Asking a question', null, null))).toBe(null)
+  expect(permissionWords(null)).toBe(null)
+})
+
+test("while a command waits for permission, the band says what it asks and what's risky about it", async ($, on) => {
+  // The command reaches Claude Code, which asks the person (the dialog) and waits: the notice comes then.
+  let release: () => void = () => undefined
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(done => (release = () => done({ result: {} })))
+  }) as never)
+  await $.turn.start({ text: 'Publish it', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build it', 'Publish it'] })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf dist && npm run build && npm publish --access public', description: 'Build and publish the package' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, 120)).join('\n')
+    expect(shown).toContain('OK to build and publish the package? It deletes files and publishes a package.')
+    expect(shown).not.toContain("Answer Claude's request in the chat")
+  }
+  release()
+  await running
+})
+
+test('in a narrow band a long permission request gets its own line, so its risk words are never cut off', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the page', 'Publish the site'] })
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  const words = 'OK to publish the site? It deletes files and deploys online.'
+  for (const surface of SURFACES) {
+    // About an 80-column terminal, and a narrow chat in the Desktop app.
+    const shown = await texts($, surface, surface === 'terminal' ? 78 : 60)
+    expect(shown).toContain(words)
+    expect(shown.some(one => one.includes('Needs you'))).toBe(true)
+    expect(shown.join('\n')).not.toContain('It…')
+  }
+})
+
+test('in Greek, a job waiting on a permission reads in Greek on every surface, with no English words of its own left', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  expect((await $.command.run({ command: 'glanceflow', args: 'language el' } as never)) as unknown).toEqual({ text: 'Το GlanceFlow μιλάει πλέον Ελληνικά.' })
+  await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the page', 'Publish the site'] })
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, surface === 'terminal' ? 78 : 60)).join('\n')
+    expect(shown).toContain('Δουλεύει')
+    expect(shown).toContain('Επόμενο')
+    expect(shown).not.toContain('Working')
+  }
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface, surface === 'terminal' ? 78 : 60)).join('\n')
+    for (const words of ['Σε χρειάζεται', 'Περιμένει', 'Η εντολή σβήνει αρχεία και το βγάζει στο διαδίκτυο.', 'Παύση', 'Πλάνο', 'Ιστορικό', 'Ρυθμίσεις']) {
+      expect(shown).toContain(words)
+    }
+    for (const words of ['Needs you', 'Waiting', 'OK to', 'deletes files', 'Pause', 'Plan', 'History', 'Settings', 'Next', 'Status', 'View']) {
+      expect(shown).not.toContain(words)
+    }
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
+})
+
+test('the Language setting shows in Settings, in the language picked, and /glanceflow language en switches back', async ($, on) => {
+  world(on)
+  const SETTINGS = { ...PANE, requestId: 'glanceflow-settings', props: { ...PANE.props, title: 'GlanceFlow settings' } } as const
+  const shown = async (surface: (typeof SURFACES)[number]) => {
+    const ui = await $.ui.mount({ ...SETTINGS, surface })
+    const words = [...(await ui.findAll({ type: 'Text' })), ...(await ui.findAll({ type: 'Button' }))].map(one => one.text)
+    const menus = (await ui.findAll({ type: 'Select' })).map(one => {
+      const props = one.props as { value?: string; options?: { value: string; label: string }[] }
+      return props.options?.find(option => option.value === props.value)?.label ?? ''
+    })
+    await ui.unmount()
+    return [...words, ...menus].join('\n')
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language el' } as never)
+  const terminal = await shown('terminal')
+  for (const words of ['Ρυθμίσεις GlanceFlow', 'Γλώσσα', '● Ελληνικά', '○ English', 'Προβολή', 'Ήχοι', 'Επαναφορά αρχικών']) expect(terminal).toContain(words)
+  for (const words of ['Language', 'Sounds', 'Reset to defaults', 'Changes apply']) expect(terminal).not.toContain(words)
+  const desktop = await shown('desktop')
+  expect(desktop).toContain('Γλώσσα')
+  expect(desktop).toContain('Ελληνικά')
+  expect(desktop).not.toContain('Language')
+
+  expect((await $.command.run({ command: 'glanceflow', args: 'language en' } as never)) as unknown).toEqual({ text: 'GlanceFlow speaks English now.' })
+  const english = await shown('terminal')
+  for (const words of ['GlanceFlow settings', 'Language', '● English', '○ Ελληνικά', 'Sounds']) expect(english).toContain(words)
+  expect(english).not.toContain('Γλώσσα')
+})
+
+test('every Greek line is there, and keeps the values its English line has', () => {
+  for (const [english, greek] of Object.entries(GREEK)) {
+    expect(typeof greek === 'string' && greek.trim() !== '').toBe(true)
+    expect((greek.match(/\{\d\}/g) ?? []).sort()).toEqual((english.match(/\{\d\}/g) ?? []).sort())
+  }
+})
+
+test('in Greek, Claude is asked to write the checklist in Greek, a Greek request is its own title, and a permission request reads as Greek', async ($, on) => {
+  let reached: () => void = () => undefined
+  const asking = new Promise<void>(done => (reached = done))
+  world(on, ((_: unknown, e: { tool?: string }) => {
+    if (e.tool !== 'Bash') return { result: {} }
+    reached()
+    return new Promise(() => undefined)
+  }) as never)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const languageSection = async () => {
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    return (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:language')?.text
+  }
+  expect(await languageSection()).toBeUndefined()
+  await $.command.run({ command: 'glanceflow', args: 'language el' } as never)
+  expect(await languageSection()).toContain('in plain everyday Greek')
+
+  // The request itself is the title until Haiku names it, not an English placeholder.
+  await $.turn.start({ text: 'Ανέβασε τη σελίδα μου', turnId: 't1' })
+  expect((await texts($, 'terminal', 100)).join('\n')).toContain('Ανέβασε τη σελίδα μου')
+  await callTool($, { tool: PLAN, steps: ['Φτιάξε τη σελίδα', 'Ανέβασέ τη'] })
+  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Δημοσίευση της σελίδας' })
+  await asking
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  for (const surface of SURFACES) {
+    expect((await texts($, surface, 120)).join('\n')).toContain('Δημοσίευση της σελίδας: εντάξει; Η εντολή σβήνει αρχεία και το βγάζει στο διαδίκτυο.')
+  }
+  await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
+})
+
+describe("Claude Desktop's own task list", () => {
+  const NATIVE = 'mcp__ccd_turn__update_plan'
+  const WRAP_UP = 'mcp__ccd_turn__wrap_up'
+  const items = (names: string[], active = 0) =>
+    names.map((content, index) => ({ content, status: index < active ? 'completed' : index === active ? 'in_progress' : 'pending' }))
+  const STEPS = ['Read the notes', 'Build the page', 'Add the form', 'Polish the footer']
+  const native = async ($: Engine, active = 0) => {
+    await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+    return callTool($, { tool: NATIVE, items: items(STEPS, active), scope: 'first_task' })
+  }
+  const desktop = async ($: Engine) => (await texts($, 'desktop', 120)).join('\n')
+  const rows = async ($: Engine, surface: 'terminal' | 'desktop' | 'vscode') => {
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 120 }, surface })
+    const found = (await ui.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+    await ui.unmount()
+    return found
+  }
+
+  test('its list and end-of-turn tools pass before any plan, and its items become the checklist', async ($, on) => {
+    world(on)
+    expect((await native($)).deny).toBeUndefined()
+    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toBeUndefined()
+    const plan = await planPaneTexts($)
+    for (const name of STEPS) expect(plan).toContain(name)
+    expect(plan).not.toContain('Understand your request')
+    expect((await callTool($, { tool: WRAP_UP, recap: 'Done' })).deny).toBeUndefined()
+  })
+
+  test('advance, done and start move the steps, and wrap_up finishes the list', async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, { tool: NATIVE, advance: true })
+    expect(await rows($, 'terminal')).toMatch(/▶ \nBuild the page/)
+    await callTool($, { tool: NATIVE, done: [2, 3], start: 4 })
+    const moved = await rows($, 'terminal')
+    expect(moved).toMatch(/▶ \nPolish the footer/)
+    expect(moved).toMatch(/✓ \nAdd the form/)
+    await callTool($, { tool: WRAP_UP, recap: 'Built the page.' })
+    await $.turn.complete({ answer: 'Built the page.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(await rows($, 'terminal')).toContain('All done')
+  })
+
+  test('a new list replans in place, keeping what matching steps got done', async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, { tool: PROGRESS, task: 'Read the notes', percent: 100, summary: 'Read every note' })
+    await callTool($, { tool: NATIVE, items: items(['Read the notes', 'Build the page', 'Ship it'], 1), scope: 'continuation' })
+    const plan = await planPaneTexts($)
+    expect(plan).toContain('Ship it')
+    expect(plan).toContain('Read every note')
+    expect(plan).not.toContain('Polish the footer')
+    expect(plan.match(/Build the page/g)?.length).toBe(1)
+    // GlanceFlow's own plan can't start a second list beside it.
+    expect((await callTool($, { tool: PLAN, steps: ['Another', 'Plan'] })).deny).toContain('update_plan')
+  })
+
+  test('input it does not recognise leaves the checklist as it was, and plan_steps still works', async ($, on) => {
+    world(on)
+    await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+    for (const input of [{}, { items: [] }, { items: 'Build' }, { items: [{ content: 'Build', status: 'someday' }] }, { items: [{ status: 'pending' }] }]) {
+      await callTool($, { tool: NATIVE, ...input })
+    }
+    // Moves it can't read do nothing either.
+    for (const input of [{ advance: 'yes' }, { advance: false }, { done: [0] }, { done: 2 }, { start: 1.5 }, { done: ['1'] }]) {
+      await callTool($, { tool: NATIVE, ...input })
+    }
+    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
+    expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
+    // On a native list, a step number past its end changes nothing.
+    await callTool($, { tool: NATIVE, items: items(['One', 'Two']) })
+    await callTool($, { tool: NATIVE, done: [7] })
+    await callTool($, { tool: NATIVE, start: 0 })
+    await callTool($, { tool: NATIVE, done: ['1'] })
+    expect(await rows($, 'terminal')).toMatch(/▶ \nOne/)
+  })
+
+  test('on the desktop the band folds the steps into a line once its list is seen; Plan, Details, terminal and VS Code keep every step', async ($, on) => {
+    world(on)
+    await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+    await callTool($, { tool: PLAN, steps: STEPS })
+    // Before the list: the whole checklist, as now.
+    for (const name of STEPS) expect(await desktop($)).toContain(name)
+
+    await callTool($, { tool: NATIVE, items: items(STEPS, 1), scope: 'first_task' })
+    const folded = await desktop($)
+    expect(folded).toContain('Build the page')
+    expect(folded).toContain("2 more in Claude's task list")
+    expect(folded).toContain('1 of 4 done')
+    for (const name of ['Add the form', 'Polish the footer']) expect(folded).not.toContain(name)
+
+    for (const surface of ['terminal', 'vscode'] as const) {
+      const shown = await rows($, surface)
+      for (const name of STEPS) expect(shown).toContain(name)
+    }
+    const plan = await planPaneTexts($)
+    for (const name of STEPS) expect(plan).toContain(name)
+    await detailsOn($)
+    for (const name of STEPS) expect(await desktop($)).toContain(name)
+  })
+
+  test('folded, the band still shows Needs you, For you, Stuck, the test result and helpers', async ($, on) => {
+    world(on, ((_: unknown, e: { tool: string }) => (e.tool === 'Bash' ? { isError: true, result: 'x', text: '1 failed' } : { result: {} })) as never)
+    on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'a1' }) as never)
+    on('classic.StopFailure', () => ({}) as never)
+    await native($)
+    await callTool($, { tool: 'Edit', file_path: '/work/src/a.ts', old_string: 'a', new_string: 'b' })
+    await callTool($, { tool: 'Bash', command: 'npm test' })
+    await callTool($, { tool: WRAP_UP, recap: 'Tests fail.' })
+    await $.turn.complete({ answer: 'Tests fail.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(await desktop($)).toContain('tests failed')
+
+    await $.turn.start({ text: 'Fix the tests', turnId: 't2' })
+    await callTool($, { tool: NATIVE, items: items(STEPS) })
+    await callTool($, { tool: PROGRESS, task: 'Read the notes', percent: 40, for_you: ['Sign in to Vercel'] })
+    await $.agent.spawn({
+      tool_use_id: 'tu-1',
+      prompt: 'Find the pricing data',
+      description: 'Find the pricing data',
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: false,
+      fork: false,
+    } as never)
+    let shown = await desktop($)
+    expect(shown).toContain("3 more in Claude's task list")
+    expect(shown).toContain('For you: Sign in to Vercel')
+    expect(shown).toContain('Find the pricing data')
+
+    await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+    expect(await desktop($)).toContain('Needs you')
+
+    await $.classic.StopFailure({ error: 'rate_limit', error_details: '' } as never)
+    shown = await desktop($)
+    expect(shown).toContain('Stuck')
+    expect(shown).toContain("3 more in Claude's task list")
+  })
+
+  test('a move before any items means its list is in use: no plan_steps, no fold, and later items become the checklist', async ($, on) => {
+    world(on)
+    for (const [index, move] of [{ advance: true }, { done: [1], start: 2 }, { start: 1 }].entries()) {
+      await $.turn.start({ text: 'Keep going', turnId: `t${index}` })
+      expect((await callTool($, { tool: NATIVE, ...move })).deny).toBeUndefined()
+      expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toBeUndefined()
+      expect((await callTool($, { tool: PLAN, steps: ['Another', 'Plan'] })).deny).toContain('update_plan')
+      const shown = await desktop($)
+      expect(shown).not.toContain("Claude's task list")
+      for (const name of STEPS) expect(shown).not.toContain(name)
+    }
+
+    await callTool($, { tool: NATIVE, items: items(STEPS, 1), scope: 'continuation' })
+    const plan = await planPaneTexts($)
+    for (const name of STEPS) expect(plan).toContain(name)
+    expect(plan.match(/Build the page/g)?.length).toBe(1)
+    expect(await desktop($)).toContain("2 more in Claude's task list")
+    await callTool($, { tool: NATIVE, advance: true })
+    expect(await rows($, 'terminal')).toMatch(/▶ \nAdd the form/)
+  })
+
+  test('other connected apps never stand in for its list', async ($, on) => {
+    world(on)
+    await $.turn.start({ text: 'Keep going', turnId: 't1' })
+    for (const tool of ['mcp__other__update_plan', 'mcp__ccd_turn__update_plans', 'mcp__ccd_turn__other']) {
+      await callTool($, { tool, advance: true, items: items(STEPS) })
+    }
+    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
+    expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
+  })
+
+  test('wrap_up asking the person something keeps the job on Needs you with that question, even with no "?" in the answer', async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, { tool: NATIVE, done: [1, 2, 3, 4] })
+    await callTool($, { tool: WRAP_UP, recap: 'Built the page.', ask: 'Deploy it to production now' })
+    await $.turn.complete({ answer: 'Built the page.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const shown = await rows($, surface)
+      expect(shown).toContain('Needs you')
+      expect(shown).toContain('Deploy it to production now')
+      expect(shown).not.toContain('All done')
+    }
+  })
+
+  test('wrap_up with no question, or an empty one, still ends on All done', async ($, on) => {
+    world(on)
+    for (const [index, ask] of [undefined, '', '   ', 7].entries()) {
+      await $.turn.start({ text: 'Build my landing page', turnId: `t${index}` })
+      await callTool($, { tool: NATIVE, items: items(STEPS) })
+      await callTool($, { tool: WRAP_UP, recap: 'Built the page.', ...(ask === undefined ? {} : { ask }) })
+      await $.turn.complete({ answer: 'Built the page.', durationMs: 1, isAborted: false, turnId: `t${index}`, reason: 'answer' })
+      const shown = await rows($, 'terminal')
+      expect(shown).toContain('All done')
+      expect(shown).not.toContain('Needs you')
+    }
+  })
+
+  test('Claude is told to keep its own task list as the plan, and the fold reads in Greek', async ($, on) => {
+    world(on)
+    on('prompt.compose', () => ({ sections: [] }) as never)
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+    const checklist = (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:checklist')?.text
+    expect(checklist).toContain('mcp__ccd_turn__update_plan')
+    expect(checklist).toContain('do not call plan_steps')
+    expect(GREEK["{0} more in Claude's task list"]).toBeTruthy()
+  })
 })
