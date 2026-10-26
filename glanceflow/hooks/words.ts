@@ -62,6 +62,7 @@ export const GREEK: Readonly<Record<string, string>> = {
   'plan grew {0} → {1}': 'το πλάνο μεγάλωσε {0} → {1}',
   '{0} steps done': '{0} βήματα έγιναν',
   '{0} more steps in Plan': '{0} ακόμα βήματα στο Πλάνο',
+  "{0} more in Claude's task list": '{0} ακόμα στη λίστα εργασιών του Claude',
   '{0} more steps': '{0} ακόμα βήματα',
   '1 more step': '1 ακόμα βήμα',
   '{0} earlier': '{0} νωρίτερα',

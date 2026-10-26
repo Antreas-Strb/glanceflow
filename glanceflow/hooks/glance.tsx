@@ -42,6 +42,11 @@ import {
   MAX_DETAIL,
   CHECK_WORDS,
   MAX_NAME,
+  NATIVE_PLAN,
+  NATIVE_WRAP_UP,
+  isNativeCall,
+  nativeAsk,
+  nativePlan,
   PLUGIN,
   QUESTION,
   RESUME_PREFIX,
@@ -128,6 +133,9 @@ const ALWAYS_ALLOWED = new Set([
   'AskUserQuestion',
   // Claude Code's own plan approval, in plan mode.
   'ExitPlanMode',
+  // Claude Desktop's own task list is a plan too, and its end-of-turn box closes one.
+  NATIVE_PLAN,
+  NATIVE_WRAP_UP,
   PLAN_TOOL,
   PROGRESS_TOOL,
 ])
@@ -282,7 +290,7 @@ very next step. Under 300 words, no preamble. Start with exactly: "Checkpoint:"`
 const PROMPT_SECTION = `# GlanceFlow (progress checklist)
 The person follows your work on a checklist above the prompt, in plain English.
 - A question you can answer straight away, with no tools, needs no plan: just answer.
-- Before you use any other tool, call plan_steps (tool ${PLAN_TOOL}) with 2 to 8 steps in order. If it is deferred, load it with ToolSearch first. If this session has TodoWrite or TaskCreate you may use that to-do list as the plan instead.
+- Before you use any other tool, call plan_steps (tool ${PLAN_TOOL}) with 2 to 8 steps in order. If it is deferred, load it with ToolSearch first. If this session has TodoWrite or TaskCreate you may use that to-do list as the plan instead. If it has Claude's own task list (tool ${NATIVE_PLAN}), use that as the plan and do not call plan_steps; report_progress still takes its step names.
 - In plan mode, skip plan_steps while you look around and write the plan. Once the person approves it, call plan_steps with that plan's own steps, then do the work.
 - Give each step a size in plan_steps' sizes list, in the same order: S (a few minutes), M, or L (the biggest pieces of work).
 - Then call report_progress (tool ${PROGRESS_TOOL}) as real progress happens, and with percent 100 the moment a step finishes. With percent 100, add a summary: one short plain-English sentence on what the step got done, like "Added a pricing table with three plans".
@@ -346,6 +354,8 @@ let isDeclining = false
 // checklist, with no second approval.
 let isPlanMode = false
 let isPlanApproved = false
+// The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
+let wrapUpAsk: string | null = null
 
 /** Ship it is over in this chat: its merge guard no longer applies. */
 const endShipping = () => {
@@ -1905,6 +1915,7 @@ export function registerGlance(on: On): void {
 
   on('turn.start', async ($, e, next) => {
     runningTurn = e.turnId
+    wrapUpAsk = null
     noteSign($)
     const text = ownWords(e.text)
     // Ship it, on a turn the person started (not a continuation or a slash command). Only the exact reply
@@ -1979,6 +1990,10 @@ export function registerGlance(on: On): void {
     // In plan mode the plan Claude hands over for approval is the plan: no checklist of the planning itself.
     if (tool === PLAN_TOOL && isPlanMode && (await read($, enabledAtom))) {
       return { deny: PLAN_MODE_WAIT }
+    }
+    // Claude Desktop's own task list is this job's plan once seen: no second list beside it.
+    if (tool === PLAN_TOOL && (await read($, checklistAtom))?.hasNativeList && (await read($, enabledAtom))) {
+      return { deny: `Claude's own task list is this job's plan: keep it with ${NATIVE_PLAN}, and report each step with ${PROGRESS_TOOL} by the same name.` }
     }
     if (tool === PLAN_TOOL) {
       const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown }
@@ -2087,7 +2102,7 @@ export function registerGlance(on: On): void {
 
     const isEnabled = await read($, enabledAtom)
     const list = await read($, checklistAtom)
-    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !isPlanMode) {
+    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
       return {
         deny: `Call ${PLAN_TOOL} first to lay out the plan in plain English (load it with ToolSearch if it is deferred), then try again.`,
       }
@@ -2166,6 +2181,33 @@ export function registerGlance(on: On): void {
         tasks: todosToTasks(todos, current.tasks),
       }))
       await holdForApproval($)
+    } else if (tool === NATIVE_PLAN) {
+      // Input it does not recognise changes nothing: GlanceFlow's own plan stays the way to lay one out.
+      const isItems = (e as unknown as { items?: unknown }).items !== undefined
+      let isAdopted = false
+      const planned = await now($)
+      await change($, current => {
+        const tasks = nativePlan(e, current.tasks, current.isNative === true)
+        // A move before any items still means the list is in use: no plan_steps, but no steps to fold yet either.
+        if (tasks === null) return isNativeCall(e) ? { ...current, hasNativeList: true } : current
+        isAdopted = true
+        return {
+          ...current,
+          hasPlan: true,
+          isNative: true,
+          hasNativeList: true,
+          planAt: current.planAt ?? planned,
+          plannedCount: current.hasPlan ? current.plannedCount : tasks.length,
+          tasks,
+        }
+      })
+      if (isAdopted && isItems) await holdForApproval($)
+    } else if (tool === NATIVE_WRAP_UP) {
+      // The turn's close: whatever is left of Claude's own list is done. A question in its box still needs the person.
+      wrapUpAsk = nativeAsk(e)
+      await change($, current =>
+        current.isNative ? { ...current, tasks: current.tasks.map(one => (one.status === 'done' ? one : { ...one, status: 'done' as const, percent: 100, hasReported: true })) } : current,
+      )
     } else if (tool === 'TaskCreate') {
       const created = (ran.result as { task?: { id?: string } } | undefined)?.task
       const id = `task#${created?.id ?? call.tool_use_id}`
@@ -2253,6 +2295,8 @@ export function registerGlance(on: On): void {
     }
     const list = await read($, checklistAtom)
     runningTurn = undefined
+    const wrappedAsk = wrapUpAsk
+    wrapUpAsk = null
     const wasPaused = isPausing
     isPausing = false
     // Ship it's merge request: the exact head commit asked about stays pending until the person replies, and an
@@ -2287,7 +2331,7 @@ export function registerGlance(on: On): void {
         await change($, current => ({ ...current, phase: 'stopped', stopKind: 'esc', needsYouReason: null, finishedAt: finished }))
       } else if (list.hasPlan && hasUnfinishedWork(list.tasks)) {
         // A helper still running means Claude waits for it, not for the person.
-        const asked = questionOf(e.answer ?? '')
+        const asked = wrappedAsk ?? questionOf(e.answer ?? '')
         await change($, current =>
           isBusy(current)
             ? current
@@ -2300,8 +2344,8 @@ export function registerGlance(on: On): void {
           tasks: current.hasPlan ? current.tasks : carryTokens(current.tasks, [task(tr('Answer your question'), 'done')]),
         }))
         // A finished job whose last message asks something, or asks to approve a merge, still waits for the person.
-        const asked = askedSha !== null ? tr('Reply exactly: Approve merge {0}', askedSha) : questionOf(e.answer ?? '')
-        const isAsking = askedSha !== null || asksQuestion(e.answer ?? '')
+        const asked = askedSha !== null ? tr('Reply exactly: Approve merge {0}', askedSha) : (wrappedAsk ?? questionOf(e.answer ?? ''))
+        const isAsking = askedSha !== null || wrappedAsk !== null || asksQuestion(e.answer ?? '')
         await change($, current => ({
           ...current,
           phase: isAsking ? 'needsYou' : 'done',
@@ -3989,12 +4033,15 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
     .sort((a, b) => b.finishedAt! - a.finishedAt!)[0]
   const showsSummary = (list.phase === 'working' || list.phase === 'done') && list.activity === null && Boolean(justDone?.summary)
 
-  // A long plan folds its finished steps, and the steps after the next one, into a line each.
-  const isCompact = list.tasks.length > COMPACT_AFTER
+  // A long plan folds its finished steps, and the steps after the next one, into a line each. On the desktop, once
+  // Claude's own task list shows the steps above, every step still to come folds into one line: Details keeps them.
+  const foldsNative = e.surface === 'desktop' && list.isNative === true && !isDetailed
+  const isCompact = list.tasks.length > COMPACT_AFTER || foldsNative
   const doneSteps = list.tasks.filter(one => one.status === 'done')
   const foldsDone = isCompact && doneSteps.length >= 2
-  const laterSteps = list.tasks.filter((one, index) => one.status === 'upcoming' && index !== firstUpcoming)
-  const foldsLater = isCompact && laterSteps.length >= 2
+  const isLater = (one: GlanceTask, index: number) => one.status === 'upcoming' && (foldsNative || index !== firstUpcoming)
+  const laterSteps = list.tasks.filter(isLater)
+  const foldsLater = isCompact && laterSteps.length >= (foldsNative ? 1 : 2)
   // Where the current step stands: the word says when Claude isn't working on it.
   const standing =
     list.phase === 'needsYou'
@@ -4044,10 +4091,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       }
       return
     }
-    if (one.status === 'upcoming' && foldsLater && index !== firstUpcoming) {
+    if (foldsLater && isLater(one, index)) {
       if (one !== laterSteps[0]) return
       // Elsewhere than the terminal the row says where the rest are.
-      const words = vector ? tr('{0} more steps in Plan', laterSteps.length) : tr('{0} more steps', laterSteps.length)
+      const words = foldsNative
+        ? tr("{0} more in Claude's task list", laterSteps.length)
+        : vector
+          ? tr('{0} more steps in Plan', laterSteps.length)
+          : tr('{0} more steps', laterSteps.length)
       lines.push({
         key,
         steps: laterSteps.length,

@@ -7,6 +7,9 @@ import { currentLang, tr } from './words'
 export { CHECK_WORDS, jobCheck } from './history'
 
 export const PLUGIN = 'glanceflow'
+// Claude Desktop's own task list and end-of-turn box, from its Code tab's built-in ccd_turn server.
+export const NATIVE_PLAN = 'mcp__ccd_turn__update_plan'
+export const NATIVE_WRAP_UP = 'mcp__ccd_turn__wrap_up'
 
 export const tourNeeds = (mark: string) =>
   tr('When Claude needs you, the checklist says Needs you {0}, and what to do. Turn on sounds or desktop notices in Settings to hear or see it from another app.', mark)
@@ -410,7 +413,7 @@ export function activityOf(tool: string, input: { command?: unknown }): string |
   if (tool === 'WebFetch') return 'Reading a web page'
   if (tool === 'WebSearch') return 'Searching the web'
   if (tool === 'Skill') return 'Following a skill'
-  if (tool.startsWith('mcp__') && !tool.startsWith(`mcp__${PLUGIN}__`)) return 'Using a connected app'
+  if (tool.startsWith('mcp__') && !tool.startsWith(`mcp__${PLUGIN}__`) && tool !== NATIVE_PLAN && tool !== NATIVE_WRAP_UP) return 'Using a connected app'
   if (tool === 'Bash' || tool === 'PowerShell') {
     const command = String(input.command ?? '')
     if (/\b(test|tests|jest|vitest|pytest|mocha|playwright|rspec)\b/i.test(command)) return 'Running the tests'
@@ -1229,6 +1232,67 @@ export function todosToTasks(
       return { ...kept, name, status }
     }),
   ))
+}
+
+const NATIVE_STATUS = ['completed', 'in_progress', 'pending']
+const finished = (one: GlanceTask): GlanceTask => ({ ...one, status: 'done', percent: 100, hasReported: true })
+const isStep = (number: unknown) => Number.isInteger(number) && Number(number) >= 1
+const isItems = (items: unknown): items is { content: string; status: string }[] =>
+  Array.isArray(items) &&
+  items.length > 0 &&
+  items.every(one => typeof one?.content === 'string' && one.content.trim() !== '' && NATIVE_STATUS.includes(String(one.status)))
+
+/**
+ * A call Claude Desktop's own task list reads: valid `items`, `advance`, or step numbers to mark `done` or `start`.
+ * Any one of them, even a move before a list, means that list is this job's plan.
+ */
+export function isNativeCall(input: unknown): boolean {
+  const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
+  if (call.items !== undefined) return isItems(call.items)
+  if (call.advance === true) return true
+  if (call.done === undefined && call.start === undefined) return false
+  return (call.done === undefined || (Array.isArray(call.done) && call.done.every(isStep))) && (call.start === undefined || isStep(call.start))
+}
+
+/** The question Claude Desktop's end-of-turn box asks the person (wrap_up's `ask`), as one plain line, or null. */
+export function nativeAsk(input: unknown): string | null {
+  const ask = ((input ?? {}) as { ask?: unknown }).ask
+  if (typeof ask !== 'string') return null
+  const line = maskPrivate(ask.replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim())
+
+  return line === '' ? null : line.length > MAX_QUESTION ? `${line.slice(0, MAX_QUESTION - 1)}…` : line
+}
+
+/**
+ * Claude Desktop's own task list call as checklist steps: a new list of `items`, `advance` to the next step, or the
+ * steps now `done` and the one to `start`, counted from 1. Moves count only on a list it has seen (`isNative`).
+ * null when the input reads as none of these, so the checklist stays as it was.
+ */
+export function nativePlan(input: unknown, previous: GlanceTask[], isNative: boolean): GlanceTask[] | null {
+  const call = (input ?? {}) as { items?: unknown; advance?: unknown; done?: unknown; start?: unknown }
+  if (call.items !== undefined) return isItems(call.items) ? todosToTasks(call.items, previous) : null
+  if (!isNative) return null
+  if (call.advance === true) {
+    const active = previous.findIndex(one => one.status === 'active')
+    return active === -1 ? null : settle(previous.map((one, index) => (index === active ? finished(one) : one)))
+  }
+  if (call.done === undefined && call.start === undefined) return null
+  const at = (number: unknown) => (Number.isInteger(number) && Number(number) >= 1 && Number(number) <= previous.length ? Number(number) - 1 : null)
+  const done = call.done === undefined ? [] : Array.isArray(call.done) ? call.done.map(at) : [null]
+  const start = call.start === undefined ? undefined : at(call.start)
+  if (done.includes(null) || start === null) return null
+
+  return settle(
+    previous.map((one, index) =>
+      done.includes(index)
+        ? finished(one)
+        : index === start
+          ? { ...one, status: 'active' as const }
+          : start !== undefined && one.status === 'active'
+            ? { ...one, status: 'upcoming' as const }
+            : one,
+    ),
+  )
 }
 
 /** What the notice says under its title: why Claude waits or is stuck, or the job's name. */
