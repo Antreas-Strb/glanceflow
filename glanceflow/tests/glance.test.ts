@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 import { GREEK } from '../hooks/words'
 
@@ -2464,6 +2464,234 @@ test('unsafeMerge leaves ordinary gh, git and shell commands alone while it read
   }
 })
 
+// What decodeEscapes makes of JSON's \uXXXX, \u{…}, \xHH and PowerShell's `u{…}; anything else stays as written.
+const ESCAPES: [string, string][] = [
+  ['\\u006dergePullRequest', 'mergePullRequest'],
+  ['\\u006DergePullRequest', 'mergePullRequest'],
+  ['\\u{6d}ergeBranch', 'mergeBranch'],
+  ['\\u{1F600}', '😀'],
+  ['\\x6derge', 'merge'],
+  ['`u{6d}erge', 'merge'],
+  ['`u{006D}erge', 'merge'],
+  ['\\u{110000} \\u00 \\x6 \\u{} `u{zz}', '\\u{110000} \\u00 \\x6 \\u{} `u{zz}'],
+  ['repos/me/site/pulls/12/merge', 'repos/me/site/pulls/12/merge'],
+]
+// Merge routes hasMergeRoute sees: dot segments, escapes, and quotes Bash joins into one word.
+const ROUTES_SEEN = [
+  'repos/me/site/pulls/12/merge',
+  'repos/me/site/pulls/12/./merge',
+  'repos/me/site/pulls/12/x/../merge',
+  'repos/me/site/pulls/./12/merge',
+  'repos/me/site/pulls/x/../12/merge',
+  'repos/me/site/pulls/12/./x/.././merge',
+  'repos/me/site/./merges',
+  'repos/me/x/../site/merges',
+  'repos/./me/site/merges',
+  '{"query":"mutation { \\u006dergePullRequest(input: {}) { clientMutationId } }"}',
+  '\\u{65}nablePullRequestAutoMerge',
+  'en\\x71ueuePullRequest',
+  '`u{6d}ergeBranch',
+  `repos/me/site/pulls/12/mer''ge`,
+  'repos/me/site/pulls/12/"merge"',
+  `'mutation { enqueue''PullRequest }'`,
+  `'{"query":"mutation { \\u006d''ergePullRequest }"}'`,
+]
+const ROUTES_NOT_SEEN = [
+  'repos/me/site/pulls/12',
+  'repos/me/site/pulls/12/merged',
+  'repos/me/site/pulls/12/./files',
+  'repos/me/site/contents/docs/merges.md',
+  'disablePullRequestAutoMerge',
+  'git commit -m "Merge the footer fix"',
+]
+
+test('decodeEscapes decodes \\u, \\u{…}, \\x and `u{…}, and hasMergeRoute reads routes past dot segments, escapes and quotes', () => {
+  for (const [text, decoded] of ESCAPES) expect([text, decodeEscapes(text)]).toEqual([text, decoded])
+  for (const text of ROUTES_SEEN) expect([text, hasMergeRoute(text)]).toEqual([text, true])
+  for (const text of ROUTES_NOT_SEEN) expect([text, hasMergeRoute(text)]).toEqual([text, false])
+})
+
+// curl and wget merges whose route only shows once dot segments go, escapes are decoded or Bash joins the quotes.
+const ROUTE_TEXT_HTTP = [
+  'curl -X PUT https://api.github.com/repos/me/site/pulls/12/./merge',
+  'curl -X PUT https://api.github.com/repos/me/site/pulls/12/x/../merge',
+  'wget --method=PUT https://api.github.com/repos/me/site/pulls/./12/merge',
+  `curl -X POST https://api.github.com/repos/me/./site/merges -d '{"base":"master","head":"fix"}'`,
+  `curl -d '{"query":"mutation { \\u006dergePullRequest(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+  `wget --post-data='{"query":"mutation { \\u0065nablePullRequestAutoMerge(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+  `curl -d '{"query":"mutation { en\\x71ueuePullRequest(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+  `curl -d '{"query":"mutation { \\u{6d}ergeBranch(input: {}) { clientMutationId } }"}' https://api.github.com/graphql`,
+  `curl -X PUT https://api.github.com/repos/me/site/pulls/12/mer''ge`,
+  'curl -X PUT "https://api.github.com/repos/me/site/pulls/12/"merge',
+]
+// The same for gh api.
+const ROUTE_TEXT_API = [
+  'gh api -X PUT repos/me/site/pulls/12/./merge',
+  'gh api -X PUT repos/{owner}/{repo}/pulls/12/x/../merge',
+  'gh api -X POST repos/me/site/./merges -f base=master -f head=fix',
+  `gh api graphql --input - <<'EOF'\n{"query":"mutation { \\u006dergePullRequest(input: {}) { clientMutationId } }"}\nEOF`,
+  `echo '{"query":"mutation { \\u0065nqueuePullRequest(input: {}) { clientMutationId } }"}' | gh api graphql --input -`,
+  `gh api graphql -f query='mutation { enqueue''PullRequest(input: {}) { clientMutationId } }'`,
+  `gh api graphql -f query='mutation { merge'"Branch"'(input: {}) { clientMutationId } }'`,
+]
+const QUERY_REFUSAL = 'gh api graphql sends only a query written out in the command'
+// gh api graphql with a query that is not written out in the command: from a file, built at run time, or read from
+// stdin that no heredoc, here-string or literal echo or printf fills.
+const HIDDEN_QUERIES = [
+  'gh api graphql --input body.json',
+  'gh api graphql --input=body.json',
+  'gh api graphql -F query=@mutation.graphql',
+  'gh api graphql --field query=@mutation.graphql',
+  'gh api graphql -Fquery=@mutation.graphql',
+  'gh api graphql --field=query=@mutation.graphql',
+  'gh api graphql -f query="$Q"',
+  'gh api graphql -f query="$(cat mutation.graphql)"',
+  'gh api graphql -F "$FIELD"',
+  'gh api graphql --raw-field query=`cat mutation.graphql`',
+  'gh api graphql --input -',
+  'cat body.json | gh api graphql --input -',
+  'gh api graphql -F query=@- < mutation.graphql',
+  'echo "$BODY" | gh api graphql --input -',
+  `printf '%s' "$BODY" | gh api graphql --input -`,
+  'gh api graphql --input - <<< "$BODY"',
+  'gh api -X POST graphql --input body.json',
+  'gh api /graphql --input body.json',
+  'env gh api graphql --input body.json',
+  'bash -c "gh api graphql --input body.json"',
+  'gh -R me/site api graphql --input body.json',
+  '"gh" api "graphql" --input body.json',
+  // A < from a file feeds stdin whatever else does: Bash reads only the last redirect, and zsh's MULTIOS reads them all.
+  `gh api graphql --input - <<'EOF' < q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql -F query=@- <<EOF 0< q.graphql\nquery { viewer { login } }\nEOF`,
+  `gh api graphql --input - <<EOF <> q.graphql\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql --input - <<< '{"query":"query { viewer { login } }"}' < q.graphql`,
+  `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input - < q.graphql`,
+  // zsh's MULTIOS reads a < or a pipe before a written heredoc or here-string too, so they hide nothing behind it.
+  `gh api graphql --input - < q.graphql <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql -F query=@- 0< q.graphql <<EOF\nquery { viewer { login } }\nEOF`,
+  `gh api graphql --input - <> q.graphql <<EOF\n{"query":"query { viewer { login } }"}\nEOF`,
+  `gh api graphql --input - < q.graphql <<< '{"query":"query { viewer { login } }"}'`,
+  `cat q.graphql | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  `cat q.graphql | gh api graphql --input - <<< '{"query":"query { viewer { login } }"}'`,
+  `cat q.graphql | gh api graphql -F query=@- -f operationName=M <<'EOF'\nquery Q { viewer { login } }\nEOF`,
+  `gh api graphql -F query=@- -f operationName=M < merge.graphql <<'EOF'\nquery Q { viewer { login } }\nEOF`,
+  // A quoted << is a word, not a heredoc.
+  `cat q.graphql | gh api graphql --input - --jq '<<'`,
+]
+// Code Bash runs from a here-string given to a shell, source or ., or from env -S: read like bash -c.
+const INLINE_MERGES = [
+  'bash <<< "gh pr merge 12 --admin"',
+  `bash <<< '${mergeAt(SHA)}'`,
+  'sh -s <<< "gh pr merge 12"',
+  'zsh <<<"gh pr merge 12"',
+  `bash <<< 'gh pr mer''ge 12'`,
+  'source /dev/stdin <<< "gh pr merge 12"',
+  '. /dev/stdin <<< "gh pr merge 12"',
+  'env -S "gh pr merge 12 --admin"',
+  `env -S '${mergeAt(SHA)}'`,
+  `env -S'gh pr merge 12'`,
+  'env --split-string="gh pr merge 12"',
+  'env --split-string "gh pr merge 12"',
+  'env -iS "gh pr merge 12"',
+  `env -S "bash -c 'gh pr merge 12'"`,
+  // macOS env's -u, -C and -P take a value, in the next word or the same one, and env reads options past it.
+  `env -u FOO -S 'gh pr merge 31 --admin'`,
+  `env -C . -S 'gh pr merge 31 --admin'`,
+  `env -P /bin -S 'gh pr merge 31 --admin'`,
+  `env -uFOO -S 'gh pr merge 31 --admin'`,
+  `env -iu FOO -S 'gh pr merge 31 --admin'`,
+  `env -u FOO -u BAR -S 'gh pr merge 31 --admin'`,
+  // GNU env's -a, --unset, --chdir and --argv0 take the next word as their value too, and a long option may be cut short.
+  `env --unset X -S 'gh pr merge 32 --admin'`,
+  `env --chdir /tmp -S 'gh pr merge 32 --admin'`,
+  `env -a x -S 'gh pr merge 32 --admin'`,
+  `env -ia x -S 'gh pr merge 32 --admin'`,
+  `env --argv0 x -S 'gh pr merge 32 --admin'`,
+  `env --uns X --ch /tmp --arg x -S 'gh pr merge 32 --admin'`,
+  `env --split 'gh pr merge 32 --admin'`,
+  `env --s='gh pr merge 32 --admin'`,
+  // env appends the words after the -S value to the split words it runs.
+  `env -S 'gh pr' merge 31 --admin`,
+  `env -S'gh pr' merge 31 --admin`,
+  `env -iS 'gh pr' merge 31 --admin`,
+  `env -u FOO -S 'gh pr' merge 31 --admin`,
+  `env -S gh pr "merge" 31`,
+]
+const INLINE_OTHERS: [string, string][] = [
+  ['bash <<< "gh mm 12"', 'alias or extension'],
+  ['bash <<< "$CMD"', 'built at run time'],
+  ['bash <<< "curl -X PUT https://api.github.com/repos/me/site/pulls/12/merge"', HTTP_REFUSAL],
+  ['source /dev/stdin <<< "gh api -X PUT repos/me/site/pulls/12/merge"', API_REFUSAL],
+  ['env -S "gh api graphql --input body.json"', QUERY_REFUSAL],
+  ['env -u FOO "$CMD"', 'built at run time'],
+  ['env -S \'gh pr\' "$SUB" 31', 'built at run time'],
+]
+// Ordinary commands that read, mention or write these routes and queries without merging: left alone.
+const ROUTE_HARMLESS = [
+  STDIN_QUERY,
+  `gh api graphql -f query='query { viewer { login } }'`,
+  `gh api graphql -F owner=me -F number="$PR" -f query='query($owner: String!, $number: Int!) { repository(owner: $owner, name: "site") { pullRequest(number: $number) { mergeable } } }'`,
+  `gh api graphql --input - <<< '{"query":"query { viewer { login } }"}'`,
+  `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
+  `printf '{"query":"query { viewer { login } }"}' | gh api graphql --input -`,
+  `gh api graphql -F query=@- <<'EOF'\nquery { viewer { login } }\nEOF`,
+  // A literal echo and a heredoc are both written out, however zsh joins them.
+  `echo '{"query":"query { viewer { login } }"}' | gh api graphql --input - <<'EOF'\n{"query":"query { viewer { login } }"}\nEOF`,
+  'gh api -X PATCH repos/me/site/pulls/12 --input body.json',
+  'gh pr view 12 --json headRefOid,mergeable',
+  'gh pr checks 12 --watch',
+  'curl -s https://api.github.com/repos/me/site/pulls/12/merged',
+  'gh pr create --title "Guard pulls/12/./merge routes" --body "Decodes \\u006dergePullRequest before it looks"',
+  `git commit -m "fix(ship): refuse gh api graphql --input body.json and env -S 'gh pr merge'"`,
+  'bash <<< "gh pr view 12"',
+  'env -S "gh pr view 12"',
+  'env -u FOO -S "gh pr view 12"',
+  'env --unset X -a x -S "gh pr view 12"',
+  `env -S 'gh pr' view 31`,
+  `env -S 'gh pr view' "$PR"`,
+  'cat <<< "gh pr merge 12"',
+]
+
+test('unsafeMerge refuses merge routes behind dot segments, escapes or joined quotes, approved or not', () => {
+  for (const command of ROUTE_TEXT_HTTP) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, HTTP_REFUSAL])
+    expect(unsafeMerge(command, SHA)).toBe(HTTP_REFUSAL)
+    expect(runsPrMerge(command)).toBe(false)
+  }
+  for (const command of ROUTE_TEXT_API) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, API_REFUSAL])
+    expect(unsafeMerge(command, SHA)).toBe(API_REFUSAL)
+    expect(runsPrMerge(command)).toBe(false)
+  }
+})
+
+test('unsafeMerge refuses gh api graphql whose query is not written out in the command, approved or not', () => {
+  for (const command of HIDDEN_QUERIES) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, expect.stringContaining(QUERY_REFUSAL)])
+    expect(unsafeMerge(command, SHA)).toContain(QUERY_REFUSAL)
+    expect(runsPrMerge(command)).toBe(false)
+  }
+})
+
+test('unsafeMerge reads the code a here-string gives a shell, source or ., and env -S, like bash -c', () => {
+  for (const command of INLINE_MERGES) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, expect.stringContaining('directly')])
+    expect(unsafeMerge(command, SHA)).toContain('directly')
+  }
+  for (const [command, refusal] of INLINE_OTHERS) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, expect.stringContaining(refusal)])
+    expect(unsafeMerge(command, SHA)).toContain(refusal)
+  }
+})
+
+test('unsafeMerge leaves literal GraphQL queries and text that only mentions routes or inline code alone', () => {
+  for (const command of ROUTE_HARMLESS) {
+    expect([command, unsafeMerge(command, null)]).toEqual([command, null])
+    expect(unsafeMerge(command, SHA)).toBeNull()
+    expect(runsPrMerge(command)).toBe(false)
+  }
+})
+
 test('askedMergeSha reads the full head commit from the approval line', () => {
   expect(askedMergeSha(`Checks passed.\nReply exactly: Approve merge ${SHA}\nAnything else leaves the pull request open.`)).toBe(SHA)
   expect(askedMergeSha(`Reply exactly: \`Approve merge ${SHA}\``)).toBe(SHA)
@@ -2840,6 +3068,56 @@ test('a refused spelled merge leaves the approval; a spelled sanctioned merge us
   expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
 })
 
+// Every route-text, hidden-query and inline-code command Ship it refuses, as Claude or a helper would send it.
+const ROUTE_REFUSED = [...ROUTE_TEXT_HTTP, ...ROUTE_TEXT_API, ...HIDDEN_QUERIES, ...INLINE_MERGES, ...INLINE_OTHERS.map(([command]) => command)]
+
+test('Ship it refuses route-text, hidden-query and inline-code merges from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'Bash', command, ...extra })).deny
+  for (const command of ROUTE_REFUSED) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of ROUTE_REFUSED) {
+    expect([command, await tries(command)]).not.toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeDefined()
+  }
+  for (const command of ROUTE_HARMLESS) {
+    expect([command, await tries(command)]).toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  // Refusing them does not end Ship it.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of ROUTE_REFUSED) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused route-text, hidden-query or inline-code merge leaves the approval; the sanctioned merge then runs once', async ($, on) => {
+  const { ask, tries, failMerges } = await shipping($, on)
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of ROUTE_REFUSED) {
+    expect([command, await tries(command)]).not.toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeDefined()
+  }
+  // Still guarded, and the approval is unused: the sanctioned merge runs, once.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  failMerges(true)
+  expect(await tries(mergeAt(SHA), { agentId: 'a1' })).toBeUndefined()
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+  for (const command of ROUTE_REFUSED) expect(await tries(command)).toBeDefined()
+})
+
 // MCP tools that merge a pull request, turn on auto-merge or add it to a merge queue, under two server prefixes.
 const MCP_MERGES = ['mcp__github__', 'mcp__plugin_engineering_github__'].flatMap(server =>
   [
@@ -3100,6 +3378,135 @@ test('a helper PowerShell merge uses the approval once, like Claude: a failed on
   expect(await ps(mergeAt(SHA))).toContain('Approve merge')
   expect(await tries(mergeAt(SHA))).toContain('Approve merge')
   expect(await ps('gh pr merge 12 --squash')).toContain(PS_REFUSAL)
+})
+
+// What the PowerShell rule reads: `u{…} decoded, backticks and quotes gone, then the other escapes decoded.
+const PS_TEXT: [string, string][] = [
+  ['g`h pr me`rge 12', 'gh pr merge 12'],
+  ['gh pr `u{6d}erge 12', 'gh pr merge 12'],
+  ['gh pr `u{6D}erge 12', 'gh pr merge 12'],
+  [`gh pr "mer"'ge' 12`, 'gh pr merge 12'],
+  ['-Body "\\u006dergeBranch"', '-Body mergeBranch'],
+  ['-Body "\\u00"6d"ergeBranch"', '-Body mergeBranch'],
+  ['-Body \\x6dergeBranch', '-Body mergeBranch'],
+  ['gh pr view 12', 'gh pr view 12'],
+  // PowerShell's own curly quotes join like ' and ": ‘ ’ ‚ ‛ and “ ” „; ‟, primes and fullwidth quotes are plain text.
+  ['gh pr me‘rge’ 12', 'gh pr merge 12'],
+  ['gh pr me‚rge‛ 12', 'gh pr merge 12'],
+  ['gh pr me“rge” 12', 'gh pr merge 12'],
+  ['gh pr me„rge“ 12', 'gh pr merge 12'],
+  ['g‘h’ pr merge 12', 'gh pr merge 12'],
+  ['gh pr view ‟12′ ＇12＂', 'gh pr view ‟12′ ＇12＂'],
+]
+// PowerShell merges spelled with `u{…}, other escapes or quotes PowerShell joins: refused, approved or not.
+const PS_SPELLED = [
+  'gh pr `u{6d}erge 12 --squash',
+  'gh pr mer"ge" 12 --squash',
+  "gh pr mer'ge' 12 --squash",
+  'gh pr "mer"ge 12 --squash',
+  'gh api -X PUT repos/me/site/pulls/12/`u{6d}erge',
+  `irm -Method Post https://api.github.com/graphql -Body '{"query":"mutation { \\u006dergePullRequest(input: {}) { clientMutationId } }"}'`,
+  `iwr -Method Post https://api.github.com/graphql -Body '{"query":"mutation { \\x6dergeBranch(input: {}) { clientMutationId } }"}'`,
+  'gh api graphql -f query="mutation { `u{65}nqueuePullRequest(input: {}) { clientMutationId } }"',
+  'gh pr me‘rge’ 32 --admin',
+  'gh pr me‚rge‛ 32 --admin',
+  'gh pr me“rge” 32 --admin',
+  'gh pr me„rge” 32 --admin',
+  'g‘h’ pr merge 32 --admin',
+  'g“h” pr merge 32 --admin',
+]
+const PS_ALIAS = 'alias or extension'
+// gh in PowerShell with a first word that is not one of gh's own commands, past -R / --repo: refused, approved or not.
+const PS_ALIASES = [
+  'gh mm 12',
+  'gh co 12',
+  'gh -R me/site mm 12',
+  'gh --repo me/site mm 12',
+  'gh --repo=me/site mm 12',
+  '"gh" mm 12',
+  'g`h mm 12',
+  'gh.exe mm 12',
+  "& 'C:\\Program Files\\GitHub CLI\\gh.exe' mm 12",
+  'gh `u{6d}m 12',
+  'gh "m"m 12',
+  "Start-Process gh -ArgumentList 'mm 12'",
+  'gh extension exec mm 12',
+  'g‘h’ mm 12',
+]
+// gh's own commands, and text with no gh: left alone.
+const PS_GH_HARMLESS = ['gh -R me/site pr view 12', 'gh --repo=me/site pr checks 12', 'gh --version', 'gh', 'gh auth status', 'gh pr view 12 --json "headRefOid"', 'git commit -m "Fix the footer"', 'gh pr me‟rge‟ 12']
+
+test('unsafePowerShellMerge rebuilds spellings: `u{…}, escapes and quotes, and refuses gh aliases and extensions', () => {
+  for (const [command, text] of PS_TEXT) expect([command, powerShellText(command)]).toEqual([command, text])
+  for (const command of PS_SPELLED) {
+    expect([command, unsafePowerShellMerge(command, null)]).toEqual([command, expect.stringContaining(PS_REFUSAL)])
+    expect(unsafePowerShellMerge(command, SHA)).toContain(PS_REFUSAL)
+    expect(runsPowerShellMerge(command)).toBe(false)
+  }
+  for (const command of PS_ALIASES) {
+    expect([command, unsafePowerShellMerge(command, null)]).toEqual([command, expect.stringContaining(PS_ALIAS)])
+    expect(unsafePowerShellMerge(command, SHA)).toContain(PS_ALIAS)
+  }
+  for (const command of [...PS_GH_HARMLESS, ...PS_HARMLESS]) {
+    expect([command, unsafePowerShellMerge(command, null)]).toEqual([command, null])
+    expect(unsafePowerShellMerge(command, SHA)).toBeNull()
+  }
+  // The sanctioned merge and the accepted false positive read as before.
+  expect(unsafePowerShellMerge(mergeAt(SHA), SHA)).toBeNull()
+  expect(unsafePowerShellMerge(mergeAt(SHA), null)).toContain('Approve merge')
+  expect(unsafePowerShellMerge(PS_FALSE_POSITIVE, SHA)).toContain(PS_REFUSAL)
+})
+
+test('Ship it refuses rebuilt PowerShell spellings and gh aliases from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
+  const shipped = await shipWorld($, on, 'https://github.com/me/site.git\n')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  await finish($)
+  const tries = async (command: string, extra: object = {}) => (await callTool($, { tool: 'PowerShell', command, ...extra })).deny
+  for (const command of [...PS_SPELLED, ...PS_ALIASES]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+
+  await pressShip($)
+  expect(shipped.sent).toHaveLength(1)
+  for (const command of PS_SPELLED) {
+    expect([command, await tries(command)]).toEqual([command, expect.stringContaining(PS_REFUSAL)])
+    expect(await tries(command, { agentId: 'a1' })).toContain(PS_REFUSAL)
+  }
+  for (const command of PS_ALIASES) {
+    expect([command, await tries(command)]).toEqual([command, expect.stringContaining(PS_ALIAS)])
+    expect(await tries(command, { agentId: 'a1' })).toContain(PS_ALIAS)
+  }
+  for (const command of PS_GH_HARMLESS) {
+    expect([command, await tries(command)]).toEqual([command, undefined])
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+  // Refusing them does not end Ship it.
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+
+  await $.command.run({ command: 'glanceflow', args: 'off' } as never)
+  for (const command of [...PS_SPELLED, ...PS_ALIASES]) {
+    expect(await tries(command)).toBeUndefined()
+    expect(await tries(command, { agentId: 'a1' })).toBeUndefined()
+  }
+})
+
+test('a refused PowerShell spelling or gh alias leaves the approval; the sanctioned PowerShell merge then runs once', async ($, on) => {
+  const { ask, tries, failMerges } = await shipping($, on)
+  const ps = async (command: string, extra: object = {}) => tries(command, { tool: 'PowerShell', ...extra })
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  for (const command of [...PS_SPELLED, ...PS_ALIASES]) {
+    expect([command, await ps(command)]).not.toEqual([command, undefined])
+    expect(await ps(command, { agentId: 'a1' })).toBeDefined()
+  }
+  // Still guarded, and the approval is unused: the sanctioned PowerShell merge runs, once.
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  failMerges(true)
+  expect(await ps(mergeAt(SHA))).toBeUndefined()
+  expect(await ps(mergeAt(SHA), { agentId: 'a1' })).toContain('Approve merge')
+  for (const command of PS_SPELLED) expect(await ps(command)).toContain(PS_REFUSAL)
 })
 
 test("a timer left from an earlier press never cancels a later one, and only one button waits for its second press", async ($, on) => {

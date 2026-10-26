@@ -579,11 +579,11 @@ export function askedMergeSha(answer: string): string | null {
 
 /**
  * A word as Bash passes it on, and whether Bash builds it at run time: from $…, `…`, a glob, {a,b}, ~ or =. `runs`
- * holds the code of an unquoted $(…) or `…` in it, which Bash runs first.
+ * holds the code of an unquoted $(…) or `…` in it, which Bash runs first. `isOperator` marks an unquoted ( ) < > << <<- <<< or >>.
  */
-export type ShellWord = { text: string; isRunTime: boolean; runs?: string[] }
-/** The words of one command, or of one line of a heredoc's body. */
-export type ShellPiece = { words: ShellWord[]; isBody: boolean }
+export type ShellWord = { text: string; isRunTime: boolean; runs?: string[]; isOperator?: boolean }
+/** The words of one command, or of one line of a heredoc's body, and whether a | feeds it the piece before. */
+export type ShellPiece = { words: ShellWord[]; isBody: boolean; isPiped: boolean }
 
 // $'…' escapes every shell spells alike; \u, \U and \c differ between Bash 3.2, newer Bash and zsh.
 const ANSI_C: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' }
@@ -602,6 +602,7 @@ export function shellPieces(command: string): ShellPiece[] {
   const heredocs: { delimiter: string; isTabbed: boolean }[] = []
   let words: ShellWord[] = []
   let word: ShellWord | null = null
+  let isPiped = false
   // The word's unquoted characters, where globs and brace lists count.
   let bare = ''
   const add = (text: string, isQuoted = false): ShellWord => {
@@ -624,10 +625,11 @@ export function shellPieces(command: string): ShellPiece[] {
     word = null
     bare = ''
   }
-  const endPiece = () => {
+  const endPiece = (pipes = false) => {
     endWord()
-    pieces.push({ words, isBody: false })
+    pieces.push({ words, isBody: false, isPiped })
     words = []
+    isPiped = pipes
   }
   // The index of the next unescaped quote, or the end.
   const end = (from: number, quote: string): number => {
@@ -754,7 +756,7 @@ export function shellPieces(command: string): ShellPiece[] {
       at = (stop < 0 ? command.length : stop) - 1
     } else if (char === ' ' || char === '\t') endWord()
     else if (';|&\n'.includes(char)) {
-      endPiece()
+      endPiece(char === '|' && next !== '|')
       if ((char === '|' || char === '&') && next === char) at++
       // After the line that starts them, heredocs' bodies, in order.
       for (const { delimiter, isTabbed } of char === '\n' ? heredocs.splice(0) : []) {
@@ -767,7 +769,7 @@ export function shellPieces(command: string): ShellPiece[] {
       const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
       const operator = command.startsWith('<<<', at) ? '<<<' : heredoc ? `<<${heredoc[1]}` : command.startsWith('>>', at) ? '>>' : char
       if (heredoc && operator !== '<<<') heredocs.push({ delimiter: heredoc[3], isTabbed: heredoc[1] === '-' })
-      words.push({ text: operator, isRunTime: false })
+      words.push({ text: operator, isRunTime: false, isOperator: true })
       at += operator.length - 1
     } else add(char)
   }
@@ -811,8 +813,32 @@ const ghPieces = (command: string): string[] =>
   })
 const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
 // gh api, curl and wget routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
-const MERGE_ROUTE =
-  /pulls\/[^/\s]+\/merge\b|repos\/[^/\s]+\/[^/\s]+\/merges\b|mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch/
+// Dot segments (/./, /x/../) may stand between a route's segments: curl drops them before it sends the request.
+const DOTS = String.raw`(?:\/\.|\/[^/\s]+\/\.\.)*`
+const MERGE_ROUTE = new RegExp(
+  String.raw`pulls${DOTS}\/[^/\s]+${DOTS}\/merge\b|repos${DOTS}\/[^/\s]+${DOTS}\/[^/\s]+${DOTS}\/merges\b|` +
+    'mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch',
+)
+
+// JSON's \uXXXX and \u{…}, \xHH, and PowerShell's `u{…}: escapes a body or a string may spell a route or mutation with.
+const PS_UNICODE = /`u\{([0-9A-Fa-f]{1,6})\}/g
+const ESCAPE = /\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})|\\x([0-9A-Fa-f]{2})/g
+const character = (escape: string, ...hex: (string | undefined)[]) => {
+  const code = parseInt(hex.find(one => one !== undefined) ?? '', 16)
+  return code <= 0x10ffff ? String.fromCodePoint(code) : escape
+}
+
+/** The text with its \uXXXX, \u{…}, \xHH and `u{…} escapes decoded, once; an escape out of range stays as written. */
+export const decodeEscapes = (text: string) => text.replace(PS_UNICODE, character).replace(ESCAPE, character)
+
+/**
+ * Whether a command names a merge route: in its text, its text with escapes decoded, or the words Bash rebuilds from it
+ * with escapes decoded, so dot segments, a JSON \u escape or a quote Bash joins hide no route.
+ */
+export const hasMergeRoute = (command: string) =>
+  [command, decodeEscapes(command), decodeEscapes(shellPieces(command).flatMap(piece => piece.words.map(word => word.text)).join(' '))].some(
+    text => MERGE_ROUTE.test(text),
+  )
 
 // A merge run through a wrapper instead of on its own: (…), { …; }, !, env, command, sudo, exec, time, xargs, VAR=x,
 // a path to gh, or eval and sh -c after any of those. Fails closed: gh pr merge outside quotes anywhere in the piece
@@ -879,6 +905,9 @@ const PR_FLAG_FIRST =
   'While Ship it runs, gh pr takes its subcommand right after pr, never after a flag, which could hide a merge. ' +
   'Put -R or --repo before pr and other flags after the subcommand.'
 const GH_ALIAS = 'While Ship it runs, gh runs only its own commands, never an alias or extension, which could hide a merge. Spell the gh command out.'
+const NO_QUERY =
+  'While Ship it runs, gh api graphql sends only a query written out in the command: -f query=\'…\', a heredoc, a here-string ' +
+  'or a literal echo, never a file or text built at run time, which could hide a merge. Write the query out.'
 const MERGE_WORDS =
   'Ship it merges only with gh pr merge, its own flags and at most one pull request. ' +
   'Run gh pr merge --squash --delete-branch --match-head-commit <approved SHA> on its own.'
@@ -911,6 +940,11 @@ const WRAPPERS = new Set(['env', 'command', 'builtin', 'sudo', 'doas', 'exec', '
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
 const AT_COMMAND = /^(?:[PA]|W[WOX]*)*$/
 const baseName = (text: string) => text.slice(text.lastIndexOf('/') + 1)
+// Whether a word is one of GNU env's long options, which getopt also takes cut short (--uns for --unset), with or without =value.
+const isEnvLong = (text: string, ...names: string[]) => {
+  const long = /^--([^=]+)/.exec(text)
+  return long !== null && names.some(name => name.startsWith(long[1]))
+}
 const wordClass = ({ text, isRunTime }: ShellWord) =>
   /^[A-Za-z_]\w*=/.test(text) ? 'A' : isRunTime ? 'X' : PREFIXES.has(text) ? 'P' : WRAPPERS.has(baseName(text)) ? 'W' : text.startsWith('-') ? 'O' : 'X'
 
@@ -929,6 +963,63 @@ function ghCommand(args: ShellWord[]): string[] | null {
   return found
 }
 
+// gh api's short flags that take a value (gh 2.100).
+const API_SHORT_VALUES = 'XHfFpqt'
+// echo or printf with nothing built at run time and no \ or %, which could spell a mutation the route check cannot read.
+const isLiteralEcho = (words: ShellWord[]) =>
+  /^(?:echo|printf)$/.test(baseName(words[0]?.text ?? '')) && words.every(word => !word.isRunTime && !/[\\%]/.test(word.text))
+
+/**
+ * Whether gh api graphql's query is not written out in the command, so the route check cannot read it: --input from a
+ * file, -F / --field query=@file, a query field built at run time, or stdin that no heredoc, here-string with a written
+ * word, or literal echo or printf piped in fills, or that any < fills from a file. `args` follow api, `words` are the whole piece, `source` pipes into it.
+ * shortcut: a heredoc's body is taken as written, even where an unquoted heredoc expands $… in it.
+ */
+function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] | null): boolean {
+  if (!args.some(word => !word.isRunTime && /(?:^|\/)graphql\/?$/.test(word.text))) return false
+  let isStdin = false
+  for (let at = 0; at < args.length; at++) {
+    const { text, isRunTime } = args[at]
+    let flag: string | undefined
+    let value: ShellWord | undefined
+    if (text.startsWith('--')) {
+      const equals = text.indexOf('=')
+      flag = text.slice(2, equals < 0 ? undefined : equals)
+      if (equals >= 0) value = { text: text.slice(equals + 1), isRunTime }
+    } else if (text.startsWith('-')) {
+      // Short flags run together (-iF); one that takes a value takes the rest of the word (past a =) or the next word.
+      const one = [...text.slice(1)].findIndex(char => API_SHORT_VALUES.includes(char)) + 1
+      const after = one > 0 ? text.slice(one + 1) : ''
+      if (one > 0) flag = text[one]
+      if (after !== '') value = { text: after.length > 1 && after[0] === '=' ? after.slice(1) : after, isRunTime }
+    }
+    if (flag !== 'input' && flag !== 'F' && flag !== 'field' && flag !== 'f' && flag !== 'raw-field') continue
+    value ??= args[++at]
+    if (value === undefined) return true
+    if (flag === 'input') {
+      if (value.isRunTime || value.text !== '-') return true
+      isStdin = true
+      continue
+    }
+    const equals = value.text.indexOf('=')
+    const name = equals < 0 ? null : value.text.slice(0, equals)
+    // A field built at run time may set the query unless its name is written out and is not query.
+    if (value.isRunTime && (name === null || name === 'query' || /[$`*?[{~]/.test(name))) return true
+    if (name === 'query' && (flag === 'F' || flag === 'field') && value.text[equals + 1] === '@') {
+      if (value.text.slice(equals + 1) !== '@-') return true
+      isStdin = true
+    }
+  }
+  if (!isStdin) return false
+  // Bash reads stdin from the last of the piece's redirects, past any pipe, but zsh's MULTIOS reads every one of them
+  // and the pipe too, so each must be written out: no < (0<, <>) from a file, no here-string built at run time, and no
+  // pipe but a literal echo or printf. A heredoc or here-string alone, with no pipe, fills stdin.
+  // shortcut: a < on another descriptor, like 3< file, is read as stdin too.
+  if (words.some((word, at) => word.isOperator && (word.text === '<' || (word.text === '<<<' && (words[at + 1]?.isRunTime ?? true))))) return true
+  if (source !== null) return !isLiteralEcho(source)
+  return !words.some(word => word.isOperator && /^<<(?:-|<)?$/.test(word.text))
+}
+
 type WordFinding = { refusal: string } | { merge: ShellWord[]; isAlone: boolean }
 
 /**
@@ -941,7 +1032,7 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
   // Blank space around the command runs nothing; a \ and newline at its end is a continued line, kept.
   const pieces = shellPieces(code.replace(/^\s+|(?<!\\)\s+$/g, ''))
   const alone = isAlone && pieces.length === 1
-  for (const { words, isBody } of pieces) {
+  for (const [index, { words, isBody, isPiped }] of pieces.entries()) {
     const classes = words.map(wordClass).join('')
     // A heredoc's line may start with anything; only the commands it names count.
     if (words[classes.search(/[^PA]/)]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
@@ -961,23 +1052,44 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
         } else if (gh[0] === 'pr' && gh[1]?.startsWith('-')) {
           // Fails closed like a merge: a flag's value could stand where gh reads its subcommand.
           found.push({ refusal: PR_FLAG_FIRST })
-        } else if (gh[0] === 'api' && MERGE_ROUTE.test(command)) found.push({ refusal: NO_API })
-        else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]) || (GH_EXTENSION.has(gh[0]) && gh[1] === 'exec'))) {
+        } else if (gh[0] === 'api' && hasMergeRoute(command)) found.push({ refusal: NO_API })
+        else if (gh[0] === 'api' && isCommand && hidesQuery(rest.slice(rest.findIndex(one => one.text === 'api') + 1), words, isPiped ? pieces[index - 1].words : null)) {
+          found.push({ refusal: NO_QUERY })
+        } else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]) || (GH_EXTENSION.has(gh[0]) && gh[1] === 'exec'))) {
           found.push({ refusal: GH_ALIAS })
         }
       } else if (!isCommand) {
         return
       } else if (WRAPPERS.has(name)) {
-        // The command a wrapper runs: its first word that is not an option or VAR=x.
-        if (rest.find(one => !/[OA]/.test(wordClass(one)))?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
-      } else if (SHELLS.has(name)) {
+        // The command a wrapper runs: its first word that is not an option or VAR=x. env's -u, -C, -P (macOS) and -a
+        // (GNU), alone or last in -iu, and GNU's --unset, --chdir and --argv0 without =, take the next word as their
+        // value, and env reads its options past that word.
+        let run = 0
+        for (; run < rest.length && /[OA]/.test(wordClass(rest[run])); run++) {
+          if (name === 'env' && (/^-[^-uCPSa]*[uCPa]$/.test(rest[run].text) || (isEnvLong(rest[run].text, 'unset', 'chdir', 'argv0') && !rest[run].text.includes('=')))) run++
+        }
+        if (rest[run]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
+        // env -S / --split-string runs the words of its value, like bash -c.
+        const split = name === 'env' ? rest.slice(0, run).findIndex(one => /^-[^-]*S/.test(one.text) || isEnvLong(one.text, 'split-string')) : -1
+        if (split >= 0) {
+          const text = rest[split].text
+          const code = text.startsWith('--') ? text.slice(text.indexOf('=') + 1 || text.length) : text.slice(text.indexOf('S') + 1)
+          // env appends the words after the value to the split words: written ones join quoted as they are, and one
+          // built at run time as a quoted "$_", which reads as built at run time again.
+          const after = rest.slice(split + (code ? 1 : 2)).map(one => (one.isRunTime ? '"$_"' : `'${one.text.replace(/'/g, `'\\''`)}'`))
+          wordFindings([code || (rest[split + 1]?.text ?? ''), ...after].join(' '), command, true, false, found)
+        }
+      } else if (SHELLS.has(name) || name === 'source' || name === '.') {
         const isPlain = !isWrapped && !isBody && at === 0 && word.text === name && words.length === 3 && rest[0].text === '-c'
-        const flag = rest.findIndex(one => /^-\w*c/.test(one.text))
+        const flag = SHELLS.has(name) ? rest.findIndex(one => /^-\w*c/.test(one.text)) : -1
+        // A here-string given to a shell, source or . is code it runs, like bash -c.
+        const here = rest.findIndex(one => one.text === '<<<')
         if (isPlain) wordFindings(rest[1].text, command, false, alone, found)
         else if (flag >= 0) for (const one of rest.slice(flag + 1)) wordFindings(one.text, command, true, false, found)
+        if (here >= 0 && rest[here + 1] !== undefined) wordFindings(rest[here + 1].text, command, true, false, found)
       } else if (name === 'eval') {
         wordFindings(rest.map(one => one.text).join(' '), command, true, false, found)
-      } else if ((name === 'curl' || name === 'wget') && MERGE_ROUTE.test(command)) {
+      } else if ((name === 'curl' || name === 'wget') && hasMergeRoute(command)) {
         found.push({ refusal: NO_HTTP })
       }
     })
@@ -1041,13 +1153,14 @@ function mergeRefusal(args: ShellWord[], approvedSha: string | null, isAlone: bo
  */
 export function unsafeMerge(command: string, approvedSha: string | null): string | null {
   // The route may sit anywhere in the written command: a heredoc body, a continued line or a literal variable.
-  if (MERGE_ROUTE.test(command) && runsHttpClient(command)) {
+  if (hasMergeRoute(command) && runsHttpClient(command)) {
     return NO_HTTP
   }
   // Likewise for gh api, so a body it reads from stdin, like gh api graphql --input - <<EOF, is seen.
-  // shortcut: reads the command as text; a body in a file (--input body.json) or made at run time is not seen, and any
+  // shortcut: reads the command as text; a REST body in a file (--input body.json) or made at run time is not seen (a
+  // GraphQL query that is not written out is refused, see hidesQuery), and any
   // gh api run beside a merge route in the text, like a heredoc that only writes one, is refused (never allowed by mistake).
-  if (MERGE_ROUTE.test(command) && runsGhApi(command)) {
+  if (hasMergeRoute(command) && runsGhApi(command)) {
     return NO_API
   }
   for (const part of ghPieces(command)) {
@@ -1072,14 +1185,33 @@ export function unsafeMerge(command: string, approvedSha: string | null): string
 // PowerShell's only merge: the whole command, one line, words apart by spaces, and a PR argument with no PowerShell
 // metacharacter (# starts a comment); none of --admin, --auto, chaining, a wrapper or a backtick fits it.
 const PS_SANCTIONED = /^gh[ \t]+pr[ \t]+merge(?:[ \t]+[\w./:][\w./:-]*)?[ \t]+--squash[ \t]+--delete-branch[ \t]+--match-head-commit[ \t]+([0-9a-f]{40})$/
-// Fail-closed PowerShell rule, no parser: read with backticks gone and case ignored, merge text (or a merge route) beside
-// gh, the GitHub API or GraphQL, or an HTTP cmdlet or client is refused.
+// Fail-closed PowerShell rule, no parser: read as powerShellText reads it and case ignored, merge text (or a merge route)
+// beside gh, the GitHub API or GraphQL, or an HTTP cmdlet or client is refused, and so is a gh alias or extension.
 // Accepted false positive: during Ship it, merge in harmless argument text, like gh pr create --title "…merge…", is
 // refused too, with no gh pr create exception. Bash keeps its own reading.
 // shortcut: reads the command as text; a command built at run time (string joins, variables, -EncodedCommand, a script
 // file) is not seen, and branch protection stays the backstop.
 const PS_MERGE = new RegExp(`merge|${MERGE_ROUTE.source}`, 'i')
 const PS_RUNNER = /(?<![\w-])(?:gh|invoke-restmethod|irm|invoke-webrequest|iwr|curl|wget)(?:\.exe)?(?![\w-])|api\.github\.com|graphql/i
+
+/**
+ * A PowerShell command as the guard reads it: `u{…} decoded, then backticks and the quote characters PowerShell reads
+ * (' ‘ ’ ‚ ‛ and " “ ” „) dropped, so escaped or quoted pieces join the way PowerShell joins them, then the other escapes decoded.
+ */
+export const powerShellText = (command: string) => decodeEscapes(command.replace(PS_UNICODE, character).replace(/[`'"‘’‚‛“”„]/g, ''))
+
+// gh's first word in PowerShell text, past -R / --repo and other flags: not one of gh's own commands, or extension exec.
+// shortcut: reads every gh word in the text, so gh followed by another word in a message is refused too.
+const runsGhAlias = (text: string) => {
+  const words = text.split(/[\s;|&(){}]+/)
+  return words.some((word, at) => {
+    if (!/(?:^|[\\/])gh(?:\.exe)?$/i.test(word)) return false
+    let next = at + 1
+    while (words[next]?.startsWith('-')) next += words[next] === '-R' || words[next] === '--repo' ? 2 : 1
+    const first = words[next] ?? ''
+    return first !== '' && (!GH_COMMANDS.has(first) || (GH_EXTENSION.has(first) && words[next + 1] === 'exec'))
+  })
+}
 
 /** Whether a PowerShell command is the sanctioned Ship it merge, as the guard reads it. */
 export const runsPowerShellMerge = (command: string) => PS_SANCTIONED.test(command.trim())
@@ -1091,7 +1223,7 @@ export const runsPowerShellMerge = (command: string) => PS_SANCTIONED.test(comma
 export function unsafePowerShellMerge(command: string, approvedSha: string | null): string | null {
   const sanctioned = PS_SANCTIONED.exec(command.trim())
   if (sanctioned) return approvedSha !== null && sanctioned[1] === approvedSha ? null : APPROVED_ONLY
-  const text = command.replace(/`/g, '')
+  const text = powerShellText(command)
   if (PS_MERGE.test(text) && PS_RUNNER.test(text)) {
     return (
       'In Ship it, PowerShell may merge only with gh pr merge --squash --delete-branch --match-head-commit <approved SHA> ' +
@@ -1099,7 +1231,7 @@ export function unsafePowerShellMerge(command: string, approvedSha: string | nul
       'even in a title. Leave the pull request open.'
     )
   }
-  return null
+  return runsGhAlias(text) ? GH_ALIAS : null
 }
 
 export const MAX_QUESTION = 160
