@@ -1203,8 +1203,9 @@ const setGuard = async ($: $, isOn: boolean) => {
   await $.store.set(GUARD_KEY, isOn)
 }
 
-/** Finish on GitHub: a finished job in a GitHub project offers Ship it. */
+/** Finish on GitHub: a finished job in a GitHub project offers Ship it. Off also ends a Ship it running in this chat. */
 const setShipOnGithub = async ($: $, isOn: boolean) => {
+  if (!isOn) endShipping()
   await update($, shipOnGithubAtom, () => isOn)
   await $.store.set(SHIP_KEY, isOn)
 }
