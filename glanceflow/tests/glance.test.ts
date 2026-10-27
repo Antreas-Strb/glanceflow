@@ -3509,6 +3509,57 @@ test('a refused PowerShell spelling or gh alias leaves the approval; the sanctio
   for (const command of PS_SPELLED) expect(await ps(command)).toContain(PS_REFUSAL)
 })
 
+test('/glanceflow ship off disarms Ship it at once in the same chat, past a failed merge and a pending request; shipping again re-arms it', async ($, on) => {
+  const { ask, tries, failMerges } = await shipping($, on)
+  const ps = async (command: string, extra: object = {}) => tries(command, { tool: 'PowerShell', ...extra })
+  // A read-only PowerShell command the alias guard refuses while Ship it runs, and merges both shells refuse.
+  const lookup = 'Get-Command gh | Select-Object Source'
+  expect(await ps(lookup)).toContain(PS_ALIAS)
+  expect(await ps('gh pr merge 12 --squash')).toContain(PS_REFUSAL)
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+
+  // An approved merge that failed, then a fresh request still waiting for its reply.
+  await ask(SHA, 't2')
+  await $.turn.start({ text: `Approve merge ${SHA}`, turnId: 't3' })
+  await callTool($, { tool: PLAN, steps: ['Merge it', 'Report back'] })
+  failMerges(true)
+  expect(await ps(mergeAt(SHA))).toBeUndefined()
+  failMerges(false)
+  await ask(SHA, 't3')
+
+  await $.command.run({ command: 'glanceflow', args: 'ship off' } as never)
+  for (const extra of [{}, { agentId: 'a1' }]) {
+    expect(await ps(lookup, extra)).toBeUndefined()
+    expect(await ps('Get-Command gh', extra)).toBeUndefined()
+    expect(await ps('gh pr merge 12 --squash', extra)).toBeUndefined()
+    expect(await tries('command -v gh', extra)).toBeUndefined()
+    expect(await tries('gh pr view 12', extra)).toBeUndefined()
+    expect(await tries('gh pr merge 12 --squash', extra)).toBeUndefined()
+  }
+  // The person's next turn does not revive the failed merge's retry.
+  await $.turn.start({ text: 'Update the branch and try again', turnId: 't4' })
+  await callTool($, { tool: PLAN, steps: ['Update it', 'Report back'] })
+  expect(await ps(lookup)).toBeUndefined()
+  expect(await tries('gh pr merge 12 --squash')).toBeUndefined()
+
+  // Stored off: a reload reads it back, and a finished job offers no Ship it until it is turned on again.
+  await $.session.start({ cwd: '/work', surface: 'terminal' } as never)
+  await $.turn.start({ text: 'Fix the footer', turnId: 't5' })
+  await callTool($, { tool: PLAN, steps: ['Fix it', 'Check it'] })
+  await callTool($, { tool: PROGRESS, task: 'Fix it', percent: 100 })
+  await callTool($, { tool: PROGRESS, task: 'Check it', percent: 100 })
+  await $.turn.complete({ answer: 'The footer is fixed.', durationMs: 1, isAborted: false, turnId: 't5', reason: 'answer' } as never)
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('Ship it')
+  await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
+  expect((await texts($, 'terminal')).join('\n')).toContain('⇡ Ship it')
+  // Shipping again re-arms the guard, with no approval carried over from before.
+  await pressShip($)
+  expect(await ps(lookup)).toContain(PS_ALIAS)
+  expect(await ps('gh pr merge 12 --squash')).toContain(PS_REFUSAL)
+  expect(await tries('gh pr merge 12 --squash')).toContain('Approve merge')
+  expect(await tries(mergeAt(SHA))).toContain('Approve merge')
+})
+
 test("a timer left from an earlier press never cancels a later one, and only one button waits for its second press", async ($, on) => {
   const { sent, clock } = await shipWorld($, on, 'https://github.com/me/site.git\n')
   await $.command.run({ command: 'glanceflow', args: 'ship on' } as never)
