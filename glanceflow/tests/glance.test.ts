@@ -2720,7 +2720,7 @@ async function shipping($: Engine, on: On) {
   await finish($)
   await pressShip($)
   expect(shipped.sent).toHaveLength(1)
-  await $.turn.start({ text: shipped.sent[0], turnId: 't2' })
+  await $.turn.start({ text: shipped.sent[0]!, turnId: 't2' })
   await callTool($, { tool: PLAN, steps: ['Open the pull request', 'Wait for checks'] })
   await callTool($, { tool: PROGRESS, task: 'Open the pull request', percent: 100 })
   await callTool($, { tool: PROGRESS, task: 'Wait for checks', percent: 100 })
@@ -2959,7 +2959,7 @@ test('a refused curl or wget merge leaves the approval and Ship it as they were,
   expect(await tries(mergeAt(OTHER_SHA))).toContain('Approve merge')
   expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
   // That merge worked and ended Ship it.
-  expect(await tries(HTTP_MERGES[0])).toBeUndefined()
+  expect(await tries(HTTP_MERGES[0]!)).toBeUndefined()
 })
 
 test('Ship it refuses gh api merges sent through stdin from Claude and helpers, and leaves them alone before it and with GlanceFlow off', async ($, on) => {
@@ -3004,7 +3004,7 @@ test('a refused gh api stdin merge leaves the approval and Ship it as they were,
   expect(await tries(mergeAt(OTHER_SHA))).toContain('Approve merge')
   expect(await tries(`gh pr merge --squash --delete-branch --match-head-commit ${SHA}`)).toBeUndefined()
   // That merge worked and ended Ship it.
-  expect(await tries(STDIN_MERGES[0])).toBeUndefined()
+  expect(await tries(STDIN_MERGES[0]!)).toBeUndefined()
 })
 
 // Every spelling Ship it refuses at the approved head commit or without it, as Claude or a helper would send it.
