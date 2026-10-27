@@ -659,7 +659,7 @@ export function shellPieces(command: string): ShellPiece[] {
       const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
       if (char === '\\') at++
       else if (char === "'" || char === '"' || char === '`') at = end(at + 1, char)
-      else if (heredoc && command.indexOf('\n', at) >= 0) at = body(command.indexOf('\n', at) + 1, heredoc[3], heredoc[1] === '-').next
+      else if (heredoc && command.indexOf('\n', at) >= 0) at = body(command.indexOf('\n', at) + 1, heredoc[3]!, heredoc[1] === '-').next
       else if (char === open) depth++
       else if (char === close && --depth === 0) return at
     }
@@ -726,7 +726,7 @@ export function shellPieces(command: string): ShellPiece[] {
   const doubleQuoted = (from: number): number => {
     add('', true)
     for (let at = from; at < command.length; at++) {
-      const char = command[at]
+      const char = command[at]!
       const next = command[at + 1]
       if (char === '"') return at
       if (char === '\\' && next !== undefined && '"\\$`\n'.includes(next)) {
@@ -739,7 +739,7 @@ export function shellPieces(command: string): ShellPiece[] {
   }
 
   for (let at = 0; at < command.length; at++) {
-    const char = command[at]
+    const char = command[at]!
     const next = command[at + 1]
     if (char === '\\') {
       at++
@@ -768,7 +768,7 @@ export function shellPieces(command: string): ShellPiece[] {
       endWord()
       const heredoc = char === '<' ? HEREDOC.exec(command.slice(at)) : null
       const operator = command.startsWith('<<<', at) ? '<<<' : heredoc ? `<<${heredoc[1]}` : command.startsWith('>>', at) ? '>>' : char
-      if (heredoc && operator !== '<<<') heredocs.push({ delimiter: heredoc[3], isTabbed: heredoc[1] === '-' })
+      if (heredoc && operator !== '<<<') heredocs.push({ delimiter: heredoc[3]!, isTabbed: heredoc[1] === '-' })
       words.push({ text: operator, isRunTime: false, isOperator: true })
       at += operator.length - 1
     } else add(char)
@@ -783,7 +783,7 @@ function commandPieces(command: string): string[] {
   let piece = ''
   let quote: string | null = null
   for (let at = 0; at < command.length; at++) {
-    const char = command[at]
+    const char = command[at]!
     if (quote === null && ';|&\n'.includes(char)) {
       pieces.push(piece)
       piece = ''
@@ -809,7 +809,7 @@ const WRAPPED = /^\s*(?:ba|z)?sh\s+-c\s+(["'])([\s\S]*)\1\s*$/
 const ghPieces = (command: string): string[] =>
   commandPieces(command).flatMap(piece => {
     const wrapped = WRAPPED.exec(piece)
-    return wrapped ? ghPieces(wrapped[2]) : [piece]
+    return wrapped ? ghPieces(wrapped[2]!) : [piece]
   })
 const PR_MERGE = /^\s*gh\s+pr\s+merge\b/
 // gh api, curl and wget routes that merge or schedule a merge: REST pull and branch merges, GraphQL merge, auto-merge and merge queue.
@@ -943,7 +943,7 @@ const baseName = (text: string) => text.slice(text.lastIndexOf('/') + 1)
 // Whether a word is one of GNU env's long options, which getopt also takes cut short (--uns for --unset), with or without =value.
 const isEnvLong = (text: string, ...names: string[]) => {
   const long = /^--([^=]+)/.exec(text)
-  return long !== null && names.some(name => name.startsWith(long[1]))
+  return long !== null && names.some(name => name.startsWith(long[1]!))
 }
 const wordClass = ({ text, isRunTime }: ShellWord) =>
   /^[A-Za-z_]\w*=/.test(text) ? 'A' : isRunTime ? 'X' : PREFIXES.has(text) ? 'P' : WRAPPERS.has(baseName(text)) ? 'W' : text.startsWith('-') ? 'O' : 'X'
@@ -954,7 +954,7 @@ function ghCommand(args: ShellWord[]): string[] | null {
   const found: string[] = []
   let isPastFlags = false
   for (let at = 0; at < args.length && found.length < 2; at++) {
-    const { text, isRunTime } = args[at]
+    const { text, isRunTime } = args[at]!
     if (isRunTime) return null
     if (isPastFlags || !text.startsWith('-') || text === '-' || found[0] === 'pr') found.push(text)
     else if (text === '--') isPastFlags = true
@@ -979,7 +979,7 @@ function hidesQuery(args: ShellWord[], words: ShellWord[], source: ShellWord[] |
   if (!args.some(word => !word.isRunTime && /(?:^|\/)graphql\/?$/.test(word.text))) return false
   let isStdin = false
   for (let at = 0; at < args.length; at++) {
-    const { text, isRunTime } = args[at]
+    const { text, isRunTime } = args[at]!
     let flag: string | undefined
     let value: ShellWord | undefined
     if (text.startsWith('--')) {
@@ -1053,9 +1053,9 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
           // Fails closed like a merge: a flag's value could stand where gh reads its subcommand.
           found.push({ refusal: PR_FLAG_FIRST })
         } else if (gh[0] === 'api' && hasMergeRoute(command)) found.push({ refusal: NO_API })
-        else if (gh[0] === 'api' && isCommand && hidesQuery(rest.slice(rest.findIndex(one => one.text === 'api') + 1), words, isPiped ? pieces[index - 1].words : null)) {
+        else if (gh[0] === 'api' && isCommand && hidesQuery(rest.slice(rest.findIndex(one => one.text === 'api') + 1), words, isPiped ? pieces[index - 1]!.words : null)) {
           found.push({ refusal: NO_QUERY })
-        } else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]) || (GH_EXTENSION.has(gh[0]) && gh[1] === 'exec'))) {
+        } else if (isCommand && gh.length > 0 && (!GH_COMMANDS.has(gh[0]!) || (GH_EXTENSION.has(gh[0]!) && gh[1] === 'exec'))) {
           found.push({ refusal: GH_ALIAS })
         }
       } else if (!isCommand) {
@@ -1065,14 +1065,14 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
         // (GNU), alone or last in -iu, and GNU's --unset, --chdir and --argv0 without =, take the next word as their
         // value, and env reads its options past that word.
         let run = 0
-        for (; run < rest.length && /[OA]/.test(wordClass(rest[run])); run++) {
-          if (name === 'env' && (/^-[^-uCPSa]*[uCPa]$/.test(rest[run].text) || (isEnvLong(rest[run].text, 'unset', 'chdir', 'argv0') && !rest[run].text.includes('=')))) run++
+        for (; run < rest.length && /[OA]/.test(wordClass(rest[run]!)); run++) {
+          if (name === 'env' && (/^-[^-uCPSa]*[uCPa]$/.test(rest[run]!.text) || (isEnvLong(rest[run]!.text, 'unset', 'chdir', 'argv0') && !rest[run]!.text.includes('=')))) run++
         }
         if (rest[run]?.isRunTime && !isBody) found.push({ refusal: RUN_TIME })
         // env -S / --split-string runs the words of its value, like bash -c.
         const split = name === 'env' ? rest.slice(0, run).findIndex(one => /^-[^-]*S/.test(one.text) || isEnvLong(one.text, 'split-string')) : -1
         if (split >= 0) {
-          const text = rest[split].text
+          const text = rest[split]!.text
           const code = text.startsWith('--') ? text.slice(text.indexOf('=') + 1 || text.length) : text.slice(text.indexOf('S') + 1)
           // env appends the words after the value to the split words: written ones join quoted as they are, and one
           // built at run time as a quoted "$_", which reads as built at run time again.
@@ -1080,13 +1080,13 @@ function wordFindings(code: string, command: string, isWrapped = false, isAlone 
           wordFindings([code || (rest[split + 1]?.text ?? ''), ...after].join(' '), command, true, false, found)
         }
       } else if (SHELLS.has(name) || name === 'source' || name === '.') {
-        const isPlain = !isWrapped && !isBody && at === 0 && word.text === name && words.length === 3 && rest[0].text === '-c'
+        const isPlain = !isWrapped && !isBody && at === 0 && word.text === name && words.length === 3 && rest[0]!.text === '-c'
         const flag = SHELLS.has(name) ? rest.findIndex(one => /^-\w*c/.test(one.text)) : -1
         // A here-string given to a shell, source or . is code it runs, like bash -c.
         const here = rest.findIndex(one => one.text === '<<<')
-        if (isPlain) wordFindings(rest[1].text, command, false, alone, found)
+        if (isPlain) wordFindings(rest[1]!.text, command, false, alone, found)
         else if (flag >= 0) for (const one of rest.slice(flag + 1)) wordFindings(one.text, command, true, false, found)
-        if (here >= 0 && rest[here + 1] !== undefined) wordFindings(rest[here + 1].text, command, true, false, found)
+        if (here >= 0 && rest[here + 1] !== undefined) wordFindings(rest[here + 1]!.text, command, true, false, found)
       } else if (name === 'eval') {
         wordFindings(rest.map(one => one.text).join(' '), command, true, false, found)
       } else if ((name === 'curl' || name === 'wget') && hasMergeRoute(command)) {
@@ -1108,7 +1108,7 @@ function mergeRefusal(args: ShellWord[], approvedSha: string | null, isAlone: bo
   const positionals: string[] = []
   const shas: string[] = []
   for (let at = 0; at < args.length; at++) {
-    const text = args[at].text
+    const text = args[at]!.text
     if (text === '--') {
       positionals.push(...args.slice(at + 1).map(word => word.text))
       break
@@ -1127,7 +1127,7 @@ function mergeRefusal(args: ShellWord[], approvedSha: string | null, isAlone: bo
     } else {
       // Short flags run together (-sd); one that takes a value takes the rest of the word (past a =) or the next word.
       for (let one = 1; one < text.length && flag === undefined; one++) {
-        const name = MERGE_SHORT.get(text[one])
+        const name = MERGE_SHORT.get(text[one]!)
         const after = text.slice(one + 1)
         if (name === undefined) return MERGE_WORDS
         if (MERGE_FLAGS.get(name)) {
