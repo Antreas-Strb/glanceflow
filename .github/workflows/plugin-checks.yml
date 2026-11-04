@@ -29,3 +29,6 @@ jobs:
         run: claude plugin validate glanceflow
       - name: Host tests
         run: claude plugin test glanceflow
+      - name: Typecheck
+        # Against the Claude Code declarations copied into .github/types (see THIRD-PARTY-NOTICES.md).
+        run: npx --yes --package typescript@5.7.3 tsc -p .github/typecheck.tsconfig.json
