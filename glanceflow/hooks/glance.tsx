@@ -35,7 +35,7 @@ import {
   sharedDayKeys,
   upsertEntry,
 } from './history'
-import { findSecrets, maskPrivate } from './privacy'
+import { findSecrets, maskPrivate, setMasking } from './privacy'
 import { currentLang, setLang, tr } from './words'
 import type { Lang } from './words'
 import {
@@ -1197,10 +1197,25 @@ const setOthers = async ($: $, isOn: boolean) => {
   if (isOn) await refreshOthers($).catch(() => undefined)
 }
 
-/** The password guard: on holds back a message that looks like it has a password or key in it. */
+/** The password guard: on holds back a message that looks like it has a password or key in it and masks private
+ * details on screen; off shows everything in full. */
 const setGuard = async ($: $, isOn: boolean) => {
+  setMasking(isOn)
   await update($, guardAtom, () => isOn)
   await $.store.set(GUARD_KEY, isOn)
+}
+
+/**
+ * A chat message as the screen shows it: while the password guard is on, personal details and secrets are masked;
+ * what Claude reads is unchanged. Reading the guard redraws a message drawn before session start loaded it or before
+ * the guard changed, and puts the switch back after a hot reload, which keeps the guard's state but starts the code
+ * afresh.
+ */
+const shownText = async ($: $, text: string) => {
+  const isGuarded = await read($, guardAtom)
+  const isEnabled = await read($, enabledAtom)
+  setMasking(isGuarded)
+  return isGuarded && isEnabled ? maskPrivate(text) : text
 }
 
 /** Finish on GitHub: a finished job in a GitHub project offers Ship it. Off also ends a Ship it running in this chat. */
@@ -1470,6 +1485,7 @@ export function registerGlance(on: On): void {
     setLang(language)
     await update($, languageAtom, () => language)
     const isGuarded = (await $.store.get(GUARD_KEY)) !== false
+    setMasking(isGuarded)
     await update($, guardAtom, () => isGuarded)
     const approves = (await $.store.get(APPROVE_KEY)) === true
     await update($, approveAtom, () => approves)
@@ -1827,15 +1843,14 @@ export function registerGlance(on: On): void {
     return next(e)
   })
 
-  // Personal details and secrets stay off the screen; what Claude reads is unchanged.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const masked = (await read($, enabledAtom)) ? maskPrivate(e.props.text) : e.props.text
+    const masked = await shownText($, e.props.text)
 
     return masked === e.props.text ? next(e) : next({ ...e, props: { ...e.props, text: masked } })
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    const masked = (await read($, enabledAtom)) ? maskPrivate(e.props.text) : e.props.text
+    const masked = await shownText($, e.props.text)
 
     return masked === e.props.text ? next(e) : next({ ...e, props: { ...e.props, text: masked } })
   })
@@ -2604,7 +2619,7 @@ export function registerGlance(on: On): void {
           choice('guard', [['off', tr('Off')], ['on', tr('On')]], isGuarded ? 'on' : 'off', value => setGuard($, value === 'on')),
           isGuarded
             ? tr('A message that looks like it has a password or key in it is held back. Press Enter again to send it anyway.')
-            : tr('Every message is sent as you write it. Keys and emails are still masked on screen.'),
+            : tr('Every message is sent as you write it, and everything shows in full: emails, passwords and keys too.'),
         )}
         {group(
           'tidy',

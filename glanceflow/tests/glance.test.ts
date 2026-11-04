@@ -329,6 +329,44 @@ test('with the password guard off, a message with a password is sent straight aw
   expect(entered).toBe(1)
 })
 
+test('with the password guard off, emails and passwords show in full; on, they are masked', async ($, on) => {
+  world(on)
+  const text = `mail jane@example.com, password: ${SAMPLE_PASSWORD}`
+  let drawn = ''
+  on('ui.render', { component: 'UserMessage' }, (_, e) => {
+    drawn = (e.props as { text: string }).text
+    return { type: 'Text', props: {}, children: [drawn] } as never
+  })
+  const shown = async () => {
+    const ui = await $.ui.mount({ plugin: 'glanceflow', surface: 'terminal', component: 'UserMessage', props: { text } } as never)
+    await ui.unmount()
+    return drawn
+  }
+  expect(await shown()).not.toContain('jane@example.com')
+
+  await $.command.run({ command: 'glanceflow', args: 'guard off' } as never)
+  expect(await shown()).toBe(text)
+
+  await $.command.run({ command: 'glanceflow', args: 'guard on' } as never)
+  expect(await shown()).not.toContain(SAMPLE_PASSWORD)
+})
+
+test('a message drawn before the guard changes is drawn again to match it', async ($, on) => {
+  world(on)
+  const text = `mail jane@example.com, password: ${SAMPLE_PASSWORD}`
+  on('ui.render', { component: 'UserMessage' }, (_, e) => ({ type: 'Text', props: {}, children: [(e.props as { text: string }).text] }) as never)
+  const ui = await $.ui.mount({ plugin: 'glanceflow', surface: 'terminal', component: 'UserMessage', props: { text } } as never)
+  const shown = async () => (await ui.find({ type: 'Text' }))?.text
+  expect(await shown()).not.toContain('jane@example.com')
+
+  await $.command.run({ command: 'glanceflow', args: 'guard off' } as never)
+  expect(await shown()).toBe(text)
+
+  await $.command.run({ command: 'glanceflow', args: 'guard on' } as never)
+  expect(await shown()).not.toContain(SAMPLE_PASSWORD)
+  await ui.unmount()
+})
+
 test('overall progress, time left and a grown plan show in the header and footer', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
