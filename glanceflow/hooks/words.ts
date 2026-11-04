@@ -379,7 +379,8 @@ export const GREEK: Readonly<Record<string, string>> = {
   'Password guard': 'Προστασία κωδικών',
   'A message that looks like it has a password or key in it is held back. Press Enter again to send it anyway.':
     'Ένα μήνυμα που μοιάζει να έχει κωδικό ή κλειδί κρατιέται πίσω. Πάτα ξανά Enter για να σταλεί έτσι κι αλλιώς.',
-  'Every message is sent as you write it. Keys and emails are still masked on screen.': 'Κάθε μήνυμα στέλνεται όπως το γράφεις. Κλειδιά και email κρύβονται ακόμα στην οθόνη.',
+  'Every message is sent as you write it, and everything shows in full: emails, passwords and keys too.':
+    'Κάθε μήνυμα στέλνεται όπως το γράφεις, και όλα φαίνονται ολόκληρα: και τα email, οι κωδικοί και τα κλειδιά.',
   'Tidy up the chat': 'Τακτοποίηση της συζήτησης',
   'Never': 'Ποτέ',
   'At {0}% full': 'Όταν γεμίσει στο {0}%',
