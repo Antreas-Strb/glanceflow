@@ -1205,6 +1205,19 @@ const setGuard = async ($: $, isOn: boolean) => {
   await $.store.set(GUARD_KEY, isOn)
 }
 
+/**
+ * A chat message as the screen shows it: while the password guard is on, personal details and secrets are masked;
+ * what Claude reads is unchanged. Reading the guard redraws a message drawn before session start loaded it or before
+ * the guard changed, and puts the switch back after a hot reload, which keeps the guard's state but starts the code
+ * afresh.
+ */
+const shownText = async ($: $, text: string) => {
+  const isGuarded = await read($, guardAtom)
+  const isEnabled = await read($, enabledAtom)
+  setMasking(isGuarded)
+  return isGuarded && isEnabled ? maskPrivate(text) : text
+}
+
 /** Finish on GitHub: a finished job in a GitHub project offers Ship it. Off also ends a Ship it running in this chat. */
 const setShipOnGithub = async ($: $, isOn: boolean) => {
   if (!isOn) endShipping()
@@ -1830,15 +1843,14 @@ export function registerGlance(on: On): void {
     return next(e)
   })
 
-  // Personal details and secrets stay off the screen; what Claude reads is unchanged.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const masked = (await read($, enabledAtom)) ? maskPrivate(e.props.text) : e.props.text
+    const masked = await shownText($, e.props.text)
 
     return masked === e.props.text ? next(e) : next({ ...e, props: { ...e.props, text: masked } })
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    const masked = (await read($, enabledAtom)) ? maskPrivate(e.props.text) : e.props.text
+    const masked = await shownText($, e.props.text)
 
     return masked === e.props.text ? next(e) : next({ ...e, props: { ...e.props, text: masked } })
   })
