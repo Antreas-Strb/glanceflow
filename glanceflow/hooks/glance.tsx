@@ -35,7 +35,7 @@ import {
   sharedDayKeys,
   upsertEntry,
 } from './history'
-import { findSecrets, maskPrivate } from './privacy'
+import { findSecrets, maskPrivate, setMasking } from './privacy'
 import { currentLang, setLang, tr } from './words'
 import type { Lang } from './words'
 import {
@@ -1197,8 +1197,10 @@ const setOthers = async ($: $, isOn: boolean) => {
   if (isOn) await refreshOthers($).catch(() => undefined)
 }
 
-/** The password guard: on holds back a message that looks like it has a password or key in it. */
+/** The password guard: on holds back a message that looks like it has a password or key in it and masks private
+ * details on screen; off shows everything in full. */
 const setGuard = async ($: $, isOn: boolean) => {
+  setMasking(isOn)
   await update($, guardAtom, () => isOn)
   await $.store.set(GUARD_KEY, isOn)
 }
@@ -1470,6 +1472,7 @@ export function registerGlance(on: On): void {
     setLang(language)
     await update($, languageAtom, () => language)
     const isGuarded = (await $.store.get(GUARD_KEY)) !== false
+    setMasking(isGuarded)
     await update($, guardAtom, () => isGuarded)
     const approves = (await $.store.get(APPROVE_KEY)) === true
     await update($, approveAtom, () => approves)
@@ -2604,7 +2607,7 @@ export function registerGlance(on: On): void {
           choice('guard', [['off', tr('Off')], ['on', tr('On')]], isGuarded ? 'on' : 'off', value => setGuard($, value === 'on')),
           isGuarded
             ? tr('A message that looks like it has a password or key in it is held back. Press Enter again to send it anyway.')
-            : tr('Every message is sent as you write it. Keys and emails are still masked on screen.'),
+            : tr('Every message is sent as you write it, and everything shows in full: emails, passwords and keys too.'),
         )}
         {group(
           'tidy',

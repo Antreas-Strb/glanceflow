@@ -31,7 +31,7 @@ These requests go under the same terms as the rest of your Claude Code use.
 
 ## On screen
 
-GlanceFlow masks emails, phone numbers, keys and card numbers in the conversation and in step names, and holds back a message that looks like it contains a password or key until you send it again. Claude still reads your original text.
+GlanceFlow masks emails, phone numbers, keys and card numbers in the conversation and in step names, and holds back a message that looks like it contains a password or key until you send it again. Claude still reads your original text. With the password guard off, nothing is masked or held back.
 
 ## Contact
 

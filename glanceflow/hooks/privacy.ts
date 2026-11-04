@@ -4,6 +4,13 @@
 
 const DOTS = '••••••••'
 
+let isMasking = true
+
+/** Follows the password guard: off shows every message, name and line in full. */
+export const setMasking = (isOn: boolean) => {
+  isMasking = isOn
+}
+
 const SECRET_PATTERNS = [
   /sk-ant-[A-Za-z0-9_-]{16,}/g,
   /\bsk-(?:proj-|live-|test-|svcacct-)?[A-Za-z0-9_-]{20,}/g,
@@ -79,6 +86,7 @@ export function findSecrets(text: string): string[] {
 
 /** Masks secrets and personal details for the screen; what Claude reads is unchanged. */
 export function maskPrivate(text: string): string {
+  if (!isMasking) return text
   let out = text
   for (const re of SECRET_PATTERNS) out = out.replace(re, DOTS)
   out = out.replace(ASSIGNMENT, (match, name: string, sep: string, value: string) =>
