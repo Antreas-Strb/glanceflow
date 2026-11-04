@@ -25,3 +25,5 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+`.github/types/` holds the plugin API declarations Claude Code 2.1.318 writes beside a mod (`.claude-plugin/types/`), copied unchanged so CI can type-check GlanceFlow. They are © Anthropic PBC, all rights reserved, used subject to the [Claude Code legal agreements](https://code.claude.com/docs/en/legal-and-compliance), and are not covered by this repository's MIT licence. To refresh them after a Claude Code update, copy `claude-code/index.d.ts` and `claude-code-tools/index.d.ts` from a loaded GlanceFlow's `.claude-plugin/types/`.
