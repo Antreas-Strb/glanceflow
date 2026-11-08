@@ -354,6 +354,8 @@ let isDeclining = false
 // checklist, with no second approval.
 let isPlanMode = false
 let isPlanApproved = false
+// A `claude -p` run or the SDK: nobody watches the checklist, so no tool waits for a plan.
+let isHeadless = false
 // The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
 let wrapUpAsk: string | null = null
 
@@ -1462,6 +1464,7 @@ export function registerGlance(on: On): void {
     return next(e)
   })
   on('session.start', async ($, e, next) => {
+    isHeadless = e.isInteractive === false
     void findPlatform($)
       .then(found => {
         platform = found
@@ -2118,7 +2121,7 @@ export function registerGlance(on: On): void {
 
     const isEnabled = await read($, enabledAtom)
     const list = await read($, checklistAtom)
-    if (isEnabled && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
+    if (isEnabled && !isHeadless && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
       return {
         deny: `Call ${PLAN_TOOL} first to lay out the plan in plain English (load it with ToolSearch if it is deferred), then try again.`,
       }

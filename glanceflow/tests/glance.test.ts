@@ -214,6 +214,24 @@ test('any tool is denied before a plan exists and allowed after', async ($, on) 
   expect(after.deny).toBe(undefined)
 })
 
+test('a headless run (claude -p) can use tools before any plan', async ($, on) => {
+  world(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: null, isInteractive: false } as never)
+  await $.turn.start({ text: 'Snapshot Finder', turnId: 't1' })
+  const first = await callTool($, { tool: 'mcp__agent-desktop__desktop_snapshot', app: 'Finder' } as never)
+  expect(first.deny).toBe(undefined)
+})
+
+test('an interactive session still waits for a plan', async ($, on) => {
+  world(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'Snapshot Finder', turnId: 't1' })
+  const first = await callTool($, { tool: 'mcp__agent-desktop__desktop_snapshot', app: 'Finder' } as never)
+  expect(first.deny).toContain('plan_steps')
+})
+
 test('a finished job says All done and collapses after 5 seconds', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
