@@ -144,6 +144,19 @@ const ALWAYS_ALLOWED = new Set([
   'mcp__mod-orchestrator__log_assumption',
   'mcp__idea-shelf__shelve_idea',
   'mcp__assumption-tracker__log_assumption',
+  // Looking before planning: a skill's instructions, a file, a search, and the memory lookups some setups ask for
+  // first thing (mnemo, claude-mem). None of them changes anything.
+  'Skill',
+  'Read',
+  'Grep',
+  'Glob',
+  'mcp__mnemo__mem_context',
+  'mcp__mnemo__mem_search',
+  'mcp__plugin_mnemo_mnemo__mem_context',
+  'mcp__plugin_mnemo_mnemo__mem_search',
+  'mcp__plugin_claude-mem_mcp-search__work_state_read',
+  'mcp__plugin_claude-mem_mcp-search__session_start_context',
+  'mcp__plugin_claude-mem_mcp-search__search',
 ])
 const STORE_KEY = 'glanceEnabled'
 const DETAIL_KEY = 'glanceDetail'
@@ -362,6 +375,12 @@ let isPlanMode = false
 let isPlanApproved = false
 // A `claude -p` run or the SDK: nobody watches the checklist, so no tool waits for a plan.
 let isHeadless = false
+// A chat started as a named agent (`claude --agent …`): its own file sets its tools, which may leave out plan_steps.
+let isAgentSession = false
+// Where the prompt now entering came from (prompt.submit's origin), read once by the turn it starts.
+let enteringFrom: string | null = null
+// Turns nobody typed: a background task's notice, another session's message, an observer's report.
+const UNTYPED = new Set(['task-notification', 'peer', 'peer-send-message', 'observer', 'observer-activity'])
 // The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
 let wrapUpAsk: string | null = null
 
@@ -1788,7 +1807,8 @@ export function registerGlance(on: On): void {
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    if (!(await read($, enabledAtom))) {
+    // Headless (`claude -p`, the SDK): nobody sees a checklist, so Claude isn't asked to keep one.
+    if (isHeadless || !(await read($, enabledAtom))) {
       return composed
     }
 
@@ -1821,6 +1841,7 @@ export function registerGlance(on: On): void {
 
   // Passwords and keys pasted into a message stay on this computer unless sent twice.
   on('prompt.submit', async ($, e, next) => {
+    enteringFrom = e.origin?.kind ?? null
     if (e.origin.kind === 'plugin' || !(await read($, guardAtom))) {
       return next(e)
     }
@@ -1942,7 +1963,10 @@ export function registerGlance(on: On): void {
     runningTurn = e.turnId
     wrapUpAsk = null
     noteSign($)
-    const text = ownWords(e.text)
+    // A notice or another session's message is not a new job of the person's: Claude carries on with the plan it has.
+    const isTyped = !UNTYPED.has(enteringFrom ?? '')
+    enteringFrom = null
+    const text = isTyped ? ownWords(e.text) : ''
     // Ship it, on a turn the person started (not a continuation or a slash command). Only the exact reply
     // "Approve merge <SHA>" to a pending request approves that head commit. Any other reply declines it: the pull
     // request stays open, the guard holds for that whole turn, and Ship it ends with it. A later turn of the person's
@@ -2127,7 +2151,7 @@ export function registerGlance(on: On): void {
 
     const isEnabled = await read($, enabledAtom)
     const list = await read($, checklistAtom)
-    if (isEnabled && !isHeadless && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
+    if (isEnabled && !isHeadless && !isAgentSession && !ALWAYS_ALLOWED.has(tool) && !list?.hasPlan && !list?.hasNativeList && !isPlanMode) {
       return {
         deny: `Call ${PLAN_TOOL} first to lay out the plan in plain English (load it with ToolSearch if it is deferred), then try again.`,
       }
@@ -2286,6 +2310,7 @@ export function registerGlance(on: On): void {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     isPlanMode = e.permission_mode === 'plan'
     isPlanApproved = false
+    isAgentSession = typeof e.agent_type === 'string' && e.agent_id === undefined
 
     return next(e)
   })

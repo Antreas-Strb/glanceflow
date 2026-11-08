@@ -250,6 +250,72 @@ test("other mods' side-note tools (idea shelf, assumptions) aren't held for a pl
   expect(edit.deny).toContain('plan_steps')
 })
 
+test('reading, searching, a skill and memory lookups go through before a plan; an edit still waits', async ($, on) => {
+  world(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  for (const tool of ['Skill', 'Read', 'Grep', 'Glob', 'mcp__mnemo__mem_context', 'mcp__plugin_claude-mem_mcp-search__work_state_read']) {
+    const looked = await callTool($, { tool } as never)
+    expect(looked.deny).toBeUndefined()
+  }
+  const edit = await callTool($, { tool: 'Edit', file_path: 'index.html' } as never)
+  expect(edit.deny).toContain('plan_steps')
+})
+
+test("a background task's notice after a finished job doesn't start a new job or ask for a new plan", async ($, on) => {
+  world(on)
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.prompt.submit({ text: 'Build my landing page', wait: false, origin: { kind: 'composer' } } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build it'] } as never)
+  await callTool($, { tool: PROGRESS, task: 'Build it', percent: 100 } as never)
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  await $.prompt.submit({ text: 'Background command "npm test" completed', wait: false, origin: { kind: 'task-notification' } } as never)
+  await $.turn.start({ text: 'Background command "npm test" completed', turnId: 't2' })
+  const read = await callTool($, { tool: 'Bash', command: 'cat test.log' } as never)
+  expect(read.deny).toBeUndefined()
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('Background command')
+
+  // A prompt the person types is a new job, as before.
+  await $.prompt.submit({ text: 'Now add a contact form', wait: false, origin: { kind: 'composer' } } as never)
+  await $.turn.start({ text: 'Now add a contact form', turnId: 't3' })
+  const edit = await callTool($, { tool: 'Edit', file_path: 'index.html' } as never)
+  expect(edit.deny).toContain('plan_steps')
+})
+
+test('a chat started as a named agent (claude --agent) is not held for a plan it may have no tool for', async ($, on) => {
+  world(on)
+  on('classic.UserPromptSubmit', () => ({}) as never)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'Run the work order', permission_mode: 'default', agent_type: 'agency-director' } as never)
+  await $.turn.start({ text: 'Run the work order', turnId: 't1' })
+  const first = await callTool($, { tool: 'Bash', command: 'git status' } as never)
+  expect(first.deny).toBeUndefined()
+
+  // A normal chat after it still waits for a plan.
+  await $.classic.UserPromptSubmit({ prompt: 'Fix the footer', permission_mode: 'default' } as never)
+  await $.turn.start({ text: 'Fix the footer', turnId: 't2' })
+  const next = await callTool($, { tool: 'Bash', command: 'git status' } as never)
+  expect(next.deny).toContain('plan_steps')
+})
+
+test("a headless run (claude -p) isn't given the checklist instructions", async ($, on) => {
+  world(on)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  const compose = () => $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+  const ids = async () => ((await compose()) as unknown as { sections: { id: string }[] }).sections.map(one => one.id)
+  await $.session.start({ cwd: '/work', surface: null, isInteractive: false } as never)
+  expect(await ids()).not.toContain('glanceflow:checklist')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  expect(await ids()).toContain('glanceflow:checklist')
+})
+
 test('a finished job says All done and collapses after 5 seconds', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
@@ -5982,7 +6048,7 @@ describe("Claude Desktop's own task list", () => {
     for (const input of [{ advance: 'yes' }, { advance: false }, { done: [0] }, { done: 2 }, { start: 1.5 }, { done: ['1'] }]) {
       await callTool($, { tool: NATIVE, ...input })
     }
-    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
+    expect((await callTool($, { tool: 'Edit', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
     expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
     // On a native list, a step number past its end changes nothing.
     await callTool($, { tool: NATIVE, items: items(['One', 'Two']) })
@@ -6081,7 +6147,7 @@ describe("Claude Desktop's own task list", () => {
     for (const tool of ['mcp__other__update_plan', 'mcp__ccd_turn__update_plans', 'mcp__ccd_turn__other']) {
       await callTool($, { tool, advance: true, items: items(STEPS) })
     }
-    expect((await callTool($, { tool: 'Read', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
+    expect((await callTool($, { tool: 'Edit', file_path: '/work/a.ts' })).deny).toContain('plan_steps')
     expect((await callTool($, { tool: PLAN, steps: ['One', 'Two'] })).deny).toBeUndefined()
   })
 
