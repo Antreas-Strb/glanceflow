@@ -1,6 +1,8 @@
 # GlanceFlow
 
 [![GlanceFlow status badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dantreas-strb%252Fglanceflow%26metric%3Dstatus%26style%3Dflat)](https://hol.org/registry/plugins/antreas-strb%2Fglanceflow)
+[![reach](https://raw.githubusercontent.com/karanb192/awesome-claude-code-mods/main/badges/Antreas-Strb--glanceflow--glanceflow-reach.svg)](https://mods.aidojo.si/mods/Antreas-Strb--glanceflow--glanceflow/)
+[![validates](https://raw.githubusercontent.com/karanb192/awesome-claude-code-mods/main/badges/Antreas-Strb--glanceflow--glanceflow-validates.svg)](https://mods.aidojo.si/mods/Antreas-Strb--glanceflow--glanceflow/)
 
 **See what Claude is doing, at a glance.** A calm checklist above the prompt: the plan, the step Claude is on, how far along it is, and a clear signal when Claude needs you.
 
