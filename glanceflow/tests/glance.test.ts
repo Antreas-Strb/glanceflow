@@ -5770,16 +5770,17 @@ test("while a command waits for permission, the band says what it asks and what'
 })
 
 test('in a narrow band a long permission request gets its own line, so its risk words are never cut off', async ($, on) => {
+  let release: () => void = () => undefined
   let reached: () => void = () => undefined
   const asking = new Promise<void>(done => (reached = done))
   world(on, ((_: unknown, e: { tool?: string }) => {
     if (e.tool !== 'Bash') return { result: {} }
     reached()
-    return new Promise(() => undefined)
+    return new Promise(done => (release = () => done({ result: {} })))
   }) as never)
   await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
   await callTool($, { tool: PLAN, steps: ['Build the page', 'Publish the site'] })
-  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
   await asking
   await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
   const words = 'OK to publish the site? It deletes files and deploys online.'
@@ -5790,15 +5791,18 @@ test('in a narrow band a long permission request gets its own line, so its risk 
     expect(shown.some(one => one.includes('Needs you'))).toBe(true)
     expect(shown.join('\n')).not.toContain('It…')
   }
+  release()
+  await running
 })
 
 test('in Greek, a job waiting on a permission reads in Greek on every surface, with no English words of its own left', async ($, on) => {
+  let release: () => void = () => undefined
   let reached: () => void = () => undefined
   const asking = new Promise<void>(done => (reached = done))
   world(on, ((_: unknown, e: { tool?: string }) => {
     if (e.tool !== 'Bash') return { result: {} }
     reached()
-    return new Promise(() => undefined)
+    return new Promise(done => (release = () => done({ result: {} })))
   }) as never)
   expect((await $.command.run({ command: 'glanceflow', args: 'language el' } as never)) as unknown).toEqual({ text: 'Το GlanceFlow μιλάει πλέον Ελληνικά.' })
   await $.turn.start({ text: 'Launch my landing page', turnId: 't1' })
@@ -5809,7 +5813,7 @@ test('in Greek, a job waiting on a permission reads in Greek on every surface, w
     expect(shown).toContain('Επόμενο')
     expect(shown).not.toContain('Working')
   }
-  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Publish the site' })
   await asking
   await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
   for (const surface of SURFACES) {
@@ -5821,6 +5825,8 @@ test('in Greek, a job waiting on a permission reads in Greek on every surface, w
       expect(shown).not.toContain(words)
     }
   }
+  release()
+  await running
   await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
 })
 
@@ -5860,12 +5866,13 @@ test('every Greek line is there, and keeps the values its English line has', () 
 })
 
 test('in Greek, Claude is asked to write the checklist in Greek, a Greek request is its own title, and a permission request reads as Greek', async ($, on) => {
+  let release: () => void = () => undefined
   let reached: () => void = () => undefined
   const asking = new Promise<void>(done => (reached = done))
   world(on, ((_: unknown, e: { tool?: string }) => {
     if (e.tool !== 'Bash') return { result: {} }
     reached()
-    return new Promise(() => undefined)
+    return new Promise(done => (release = () => done({ result: {} })))
   }) as never)
   on('prompt.compose', () => ({ sections: [] }) as never)
   const languageSection = async () => {
@@ -5880,12 +5887,14 @@ test('in Greek, Claude is asked to write the checklist in Greek, a Greek request
   await $.turn.start({ text: 'Ανέβασε τη σελίδα μου', turnId: 't1' })
   expect((await texts($, 'terminal', 100)).join('\n')).toContain('Ανέβασε τη σελίδα μου')
   await callTool($, { tool: PLAN, steps: ['Φτιάξε τη σελίδα', 'Ανέβασέ τη'] })
-  void callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Δημοσίευση της σελίδας' })
+  const running = callTool($, { tool: 'Bash', command: 'rm -rf .vercel/output && npx vercel deploy --prod', description: 'Δημοσίευση της σελίδας' })
   await asking
   await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
   for (const surface of SURFACES) {
     expect((await texts($, surface, 120)).join('\n')).toContain('Δημοσίευση της σελίδας: εντάξει; Η εντολή σβήνει αρχεία και το βγάζει στο διαδίκτυο.')
   }
+  release()
+  await running
   await $.command.run({ command: 'glanceflow', args: 'language en' } as never)
 })
 
