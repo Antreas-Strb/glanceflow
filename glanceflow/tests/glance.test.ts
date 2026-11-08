@@ -232,6 +232,24 @@ test('an interactive session still waits for a plan', async ($, on) => {
   expect(first.deny).toContain('plan_steps')
 })
 
+test("other mods' side-note tools (idea shelf, assumptions) aren't held for a plan", async ($, on) => {
+  world(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  for (const tool of [
+    'mcp__mod-orchestrator__shelve_idea',
+    'mcp__mod-orchestrator__log_assumption',
+    'mcp__idea-shelf__shelve_idea',
+    'mcp__assumption-tracker__log_assumption',
+  ]) {
+    const noted = await callTool($, { tool, text: 'Use Tailwind' } as never)
+    expect(noted.deny).toBeUndefined()
+  }
+  const edit = await callTool($, { tool: 'Edit', file_path: 'index.html' } as never)
+  expect(edit.deny).toContain('plan_steps')
+})
+
 test('a finished job says All done and collapses after 5 seconds', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)

@@ -138,6 +138,12 @@ const ALWAYS_ALLOWED = new Set([
   NATIVE_WRAP_UP,
   PLAN_TOOL,
   PROGRESS_TOOL,
+  // Side notes other mods ask Claude to jot mid-task (AI Labs' idea-shelf and assumption-tracker,
+  // bundled in mod-orchestrator or installed alone): holding them for a plan would lose the note.
+  'mcp__mod-orchestrator__shelve_idea',
+  'mcp__mod-orchestrator__log_assumption',
+  'mcp__idea-shelf__shelve_idea',
+  'mcp__assumption-tracker__log_assumption',
 ])
 const STORE_KEY = 'glanceEnabled'
 const DETAIL_KEY = 'glanceDetail'
