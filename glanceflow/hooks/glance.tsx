@@ -34,6 +34,7 @@ import {
   plainDuration,
   sharedDayKeys,
   upsertEntry,
+  growthWords,
 } from './history'
 import { findSecrets, maskPrivate, setMasking } from './privacy'
 import { currentLang, setLang, tr } from './words'
@@ -3520,6 +3521,7 @@ export function registerGlance(on: On): void {
       view.entries.length === 1 ? tr('1 task') : tr('{0} tasks', view.entries.length),
       counts.join(', '),
       (vector ? plainDuration : formatDuration)(time),
+      growthWords(view.entries),
       tokenNote(newTokens + cached, cached),
       priced.length > 0 ? formatCost(spent) : '',
     ]

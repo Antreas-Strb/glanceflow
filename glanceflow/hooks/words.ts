@@ -213,6 +213,8 @@ export const GREEK: Readonly<Record<string, string>> = {
   "Answer Claude's request in the chat": 'Απάντησε στο αίτημα του Claude στη συζήτηση',
   'Another mod is waiting for your answer in its panel': 'Ένα άλλο mod περιμένει την απάντησή σου στο πάνελ του',
   'Outcome: {0}': 'Αποτέλεσμα: {0}',
+  '{0} of {1} grew past their first plan': '{0} από {1} μεγάλωσαν πέρα από το πρώτο πλάνο',
+  '{0} of {1} tasks grew past their first plan.': '{0} από {1} εργασίες μεγάλωσαν πέρα από το πρώτο τους πλάνο.',
   'Left out of this job': 'Εκτός αυτής της δουλειάς',
   'Saved for later': 'Για αργότερα',
   'Later: {0}': 'Για αργότερα: {0}',
