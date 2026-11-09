@@ -98,6 +98,7 @@ import { holdsForPerson, kitRun,
   resetTime,
   runsCheck,
   runsChangedFile,
+  nestHelpers,
   sentenceCase,
   sizeOf,
   stampTimes,
@@ -1046,7 +1047,11 @@ const settleFinished = async ($: $, at: number, isNewAnswer: boolean) => {
 const addHelper = ($: $, helper: Omit<GlanceHelper, 'stepId'>) =>
   change($, current => ({
     ...current,
-    helpers: [...current.helpers.filter(one => one.id !== helper.id), { ...helper, stepId: currentStepId(current) }],
+    // A specialist stays with its Director's step.
+    helpers: [
+      ...current.helpers.filter(one => one.id !== helper.id),
+      { ...helper, stepId: current.helpers.find(one => one.id === helper.parentId)?.stepId ?? currentStepId(current) },
+    ],
   }))
 
 const noteHelperStep = async ($: $, agentId: string, model: string, effort: unknown) => {
@@ -2039,6 +2044,7 @@ export function registerGlance(on: On): void {
         kind: 'helper',
         label: cleanName(e.description, MAX_DETAIL),
         type: isUnderDirector ? e.subagentType.replace(/^agency-/, '') : e.subagentType,
+        ...(isUnderDirector ? { parentId: e.parentAgentId } : {}),
         isBackground: e.background,
         model: prettyModel(started.model),
         effort: null,
@@ -3088,9 +3094,8 @@ export function registerGlance(on: On): void {
         </Text>
       )
     const helperRows = (one: GlanceTask) =>
-      list.helpers
-        .filter(helper => helper.stepId === one.id)
-        .map(helper => {
+      nestHelpers(list.helpers.filter(helper => helper.stepId === one.id))
+        .map(({ helper, depth }) => {
           const mark = helper.status === 'running' ? '◐' : helper.status === 'failed' ? '✗' : '✓'
           const kind = helper.kind === 'background' ? tr('in the background') : helper.type === 'general-purpose' ? tr('helper') : helper.type
           const details = [kind, helper.model, isDetailed && helper.effort ? tr('{0} effort', helper.effort) : null, isDetailed && helper.tokens > 0 ? tr('{0} tokens', formatTokens(helper.tokens)) : null]
@@ -3107,7 +3112,7 @@ export function registerGlance(on: On): void {
                     ? kit.badge('close', 'alert', tr('Failed'), 13)
                     : kit.badge('check', 'ok', tr('Done'), 13),
               )
-            : note(`helper-${helper.id}`, `↳ ${mark} ${words}`)
+            : note(`helper-${helper.id}`, `${'  '.repeat(depth)}↳ ${mark} ${words}`)
           // A helper's own transcript opens in the main view; one working in the background can be stopped alone
           // (any other stops with Esc, with Claude).
           const canOpen = helper.kind === 'helper'
@@ -4509,7 +4514,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
         ),
       })
     }
-    for (const helper of helpersOf(one.id).filter(helper => !(foldsDone && one.status === 'done') || helper.status === 'running')) {
+    for (const { helper, depth } of nestHelpers(helpersOf(one.id).filter(helper => !(foldsDone && one.status === 'done') || helper.status === 'running'))) {
       const helperKey = `helper-${helper.id}`
       // Say "in the background" once: not when the task's own name already does.
       const kindLabel =
@@ -4541,7 +4546,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
           isActive: isRunning,
           element: line(
             helperKey,
-            kit.blank(),
+            depth > 0 ? (
+              <Box flexDirection="row" gap={1}>
+                {kit.blank()}
+                {kit.blank()}
+              </Box>
+            ) : (
+              kit.blank()
+            ),
             <Box flexDirection="row" alignItems="center" gap={1}>
               {isRunning
                 ? kit.ring(null, isCalm ? 0 : tick, tr('Running'), 13)
@@ -4559,14 +4571,14 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
       }
       const icon = isRunning ? (isCalm ? '◐' : SPINNER[tick % SPINNER.length]!) : helper.status === 'failed' ? '✗' : '✓'
       // The whole row is the description's: "in the background" and the details go first when it is short of room.
-      const room = Math.max(4, columns - 7)
+      const room = Math.max(4, columns - 7 - 2 * depth)
       const hasRoom = details !== '' && widthOf(helper.label) + 1 + widthOf(details) <= room
       lines.push({
         key: helperKey,
         isActive: isRunning,
         element: (
           <Box key={helperKey} flexDirection="row">
-            <Text dimColor>{'  ↳ '}</Text>
+            <Text dimColor>{depth > 0 ? '    ↳ ' : '  ↳ '}</Text>
             <Text color={isRunning ? 'cyan' : helper.status === 'failed' ? 'red' : 'green'}>{`${icon} `}</Text>
             <Text dimColor={!isRunning} wrap="truncate-end">
               {hasRoom ? helper.label : fit(helper.label, room).trimEnd()}

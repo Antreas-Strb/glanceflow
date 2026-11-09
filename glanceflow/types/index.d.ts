@@ -57,6 +57,8 @@ export type GlanceHelper = {
   /** How hard it thinks (low to max); null until known or for a model without effort. */
   effort: string | null
   status: 'running' | 'done' | 'failed'
+  /** The helper that started it (a Workflow Kit specialist's Director); it shows under that one. */
+  parentId?: string
   /** A helper Claude started to work in the background: its Stop ends it alone. */
   isBackground?: boolean
   /** Tokens this helper's own model requests handled. */
