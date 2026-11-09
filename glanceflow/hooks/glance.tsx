@@ -97,6 +97,7 @@ import { holdsForPerson, kitRun,
   reportOf,
   resetTime,
   runsCheck,
+  runsChangedFile,
   sentenceCase,
   sizeOf,
   stampTimes,
@@ -846,7 +847,13 @@ const noteFile = async ($: $, path: string, isNew: boolean) => {
 // A test, build or type check Claude ran: its result marks the steps that changed code. A run the person rejected or
 // interrupted says nothing about the code.
 const noteCheck = async ($: $, tool: string, input: { command?: unknown }, ran: { deny?: string; isError?: boolean; text?: unknown }) => {
-  if ((tool !== 'Bash' && tool !== 'PowerShell') || ran.deny || !runsCheck(String(input.command ?? ''))) return
+  if ((tool !== 'Bash' && tool !== 'PowerShell') || ran.deny) return
+  const command = String(input.command ?? '')
+  if (!runsCheck(command)) {
+    // Running the script it wrote checks it too (`python3 hello.py`).
+    const files = (await read($, checklistAtom))?.tasks.flatMap(one => (one.files ?? []).map(file => file.path)) ?? []
+    if (!runsChangedFile(command, files)) return
+  }
   const text = String(ran.text ?? '')
   if (ran.isError && (REJECTED.test(text) || /\binterrupted\b/i.test(text))) return
   await change($, list => ({ ...list, tasks: applyCheck(list.tasks, checkResult(ran.isError === true, text)) }))
