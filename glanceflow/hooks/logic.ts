@@ -1495,3 +1495,10 @@ export function otherChatsWords(others: readonly GlanceOtherChat[]): string[] {
       : tr('{0} other chats need you: {1}', waiting.length, waiting.map(one => one.title).join(', '))
   return [first, ...(working === 0 ? [] : [tr('{0} more at work', working)])]
 }
+
+/**
+ * Another mod opened a panel for the person while one of Claude's steps runs: a panel that takes the keyboard,
+ * not GlanceFlow's own, during a tool call (Blast Radius holding a command, say).
+ */
+export const holdsForPerson = (pane: { id: string; focus?: true }, ownPrefix: string, toolsRunning: number) =>
+  pane.focus === true && !pane.id.startsWith(ownPrefix) && toolsRunning > 0

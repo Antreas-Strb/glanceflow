@@ -211,6 +211,7 @@ export const GREEK: Readonly<Record<string, string>> = {
   "Answer Claude's question in the chat": 'Απάντησε στην ερώτηση του Claude στη συζήτηση',
   'Reply to Claude in the box below': 'Απάντησε στο Claude στο πλαίσιο από κάτω',
   "Answer Claude's request in the chat": 'Απάντησε στο αίτημα του Claude στη συζήτηση',
+  'Another mod is waiting for your answer in its panel': 'Ένα άλλο mod περιμένει την απάντησή σου στο πάνελ του',
   'Read the plan, then press Start or tell Claude what to change': 'Διάβασε το πλάνο και πάτα Έναρξη, ή πες στο Claude τι να αλλάξει',
   'Reply exactly: Approve merge {0}': 'Απάντησε ακριβώς: Approve merge {0}',
   'you said no to a step, so Claude paused': 'είπες όχι σε ένα βήμα, οπότε το Claude σταμάτησε',
