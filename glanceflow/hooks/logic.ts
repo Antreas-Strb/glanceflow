@@ -508,6 +508,20 @@ const CHECK_COMMAND = new RegExp(
 /** Whether a shell command runs the project's tests, build, type check or lint: the outside judge for a step's code. */
 export const runsCheck = (command: string) => commandPieces(command).some(piece => CHECK_COMMAND.test(piece))
 
+// An interpreter that runs a file, or a file run as ./name: `python3 hello.py`, `node scripts/build.mjs --fast`, `./run.sh`.
+const RUNNER = /^(?:python3?|node|bun|deno|ruby|perl|php|bash|sh|zsh|tsx|ts-node)$/
+
+/**
+ * Whether a shell command runs one of the files Claude changed (by its path in the project): Claude checking that it
+ * works. shortcut: matches the path as written; `cd src && node app.js` is not seen, add folder tracking if it shows up.
+ */
+export const runsChangedFile = (command: string, files: string[]) =>
+  commandPieces(command).some(piece => {
+    const [first = '', ...rest] = piece.trim().split(/\s+/).filter(word => !/^\w+=/.test(word))
+    const target = RUNNER.test(first) ? rest.find(word => !word.startsWith('-') && word !== 'run') : first.startsWith('./') ? first : undefined
+    return target !== undefined && files.includes(target.replace(/^['"]|['"]$/g, '').replace(/^\.\//, ''))
+  })
+
 // Failure counts, a FAIL line, TypeScript errors or a failed build in the output. `npm test 2>&1 | tail` and `|| true`
 // report the last command's exit code, not the tests', so the output is read too.
 // shortcut: heuristic text matching; a runner that prints failures another way passes, add its wording when seen.

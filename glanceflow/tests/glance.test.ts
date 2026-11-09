@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, holdsForPerson, kitRun, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, holdsForPerson, kitRun, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, runsChangedFile, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 import { GREEK } from '../hooks/words'
 
@@ -4937,6 +4937,25 @@ test('a finished job says whether the code it changed was tested, by the tests r
   await bash('npm test')
   await callTool($, { tool: PROGRESS, task: 'Fix the bug', percent: 100 })
   expect(await planPaneTexts($)).toContain(' took 0s · not tested')
+})
+
+test('running the script Claude wrote counts as checking it; running some other file does not', async ($, on) => {
+  world(on, ((_: unknown, e: { tool: string }) => (e.tool === 'Bash' ? { result: {}, text: 'hello' } : { result: {} })) as never)
+  const job = async (turn: number, command: string) => {
+    await $.turn.start({ text: `Write the hello script ${turn}`, turnId: `t${turn}` })
+    await callTool($, { tool: PLAN, steps: ['Write it'] })
+    await callTool($, { tool: 'Write', file_path: '/work/hello.py', content: 'print("hello")' })
+    await callTool($, { tool: 'Bash', command })
+    await callTool($, { tool: PROGRESS, task: 'Write it', percent: 100 })
+    await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: `t${turn}`, reason: 'answer' })
+    return (await texts($, 'terminal')).find(line => line.startsWith('✓ All done')) ?? ''
+  }
+  expect(await job(1, 'python3 hello.py')).toMatch(/ · tested · /)
+  expect(await job(2, 'python3 other.py')).toContain(' · not tested')
+  expect(runsChangedFile('cd x; PYTHONPATH=. python3 -u ./hello.py', ['hello.py'])).toBe(true)
+  expect(runsChangedFile('./run.sh --fast', ['run.sh'])).toBe(true)
+  expect(runsChangedFile('cat hello.py', ['hello.py'])).toBe(false)
+  expect(runsChangedFile('python3 -c "print(1)"', ['hello.py'])).toBe(false)
 })
 
 test('a plan says what done looks like, in the Plan and in the Team report, beside whether it was tested', async ($, on) => {
