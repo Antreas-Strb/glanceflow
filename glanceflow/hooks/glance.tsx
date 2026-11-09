@@ -2023,12 +2023,15 @@ export function registerGlance(on: On): void {
   // Subagents: what they work on and which model, under the step that started them.
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
-    if (started.agentId !== undefined && e.parentAgentId === undefined) {
+    // Workflow Kit's Director hands most work straight to its specialists (researcher, coder, critic): they show too.
+    const isUnderDirector =
+      e.parentAgentId !== undefined && (await read($, checklistAtom))?.helpers.some(one => one.id === e.parentAgentId && one.type === 'agency-director') === true
+    if (started.agentId !== undefined && (e.parentAgentId === undefined || isUnderDirector)) {
       await addHelper($, {
         id: started.agentId,
         kind: 'helper',
         label: cleanName(e.description, MAX_DETAIL),
-        type: e.subagentType,
+        type: isUnderDirector ? e.subagentType.replace(/^agency-/, '') : e.subagentType,
         isBackground: e.background,
         model: prettyModel(started.model),
         effort: null,

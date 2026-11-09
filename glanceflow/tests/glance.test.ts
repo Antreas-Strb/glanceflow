@@ -411,6 +411,25 @@ test("while Workflow Kit's Director runs, its work orders show as helpers under 
   expect(shown).not.toContain('Review form')
 })
 
+test("the Director's specialists show as helpers, other helpers' own helpers don't", async ($, on) => {
+  world(on)
+  const ids = ['director', 'r1', 'gp', 'inner']
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: ids.shift() }) as never)
+  await detailsOn($)
+  await $.turn.start({ text: 'Check the README heading', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Hand the work to the Director'] })
+  const spawn = (description: string, subagentType: string, parentAgentId?: string) =>
+    $.agent.spawn({ tool_use_id: description, prompt: 'Go', description, subagentType, parentAgentId, provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false } as never)
+  await spawn('Run the work order', 'agency-director')
+  await spawn('Report README heading', 'agency-researcher', 'director')
+  await spawn('Look around', 'general-purpose')
+  await spawn('Dig deeper', 'Explore', 'gp')
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('Report README heading')
+  expect(shown).toContain('researcher')
+  expect(shown).not.toContain('Dig deeper')
+})
+
 test("a helper working out of sight doesn't make the job look stuck", async ($, on) => {
   const clock = world(on)
   on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'a1' }) as never)
