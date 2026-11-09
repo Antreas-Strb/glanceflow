@@ -6302,3 +6302,81 @@ describe("Claude Desktop's own task list", () => {
     expect(GREEK["{0} more in Claude's task list"]).toBeTruthy()
   })
 })
+
+test('a plan says what the job delivers and what it leaves out, and the Plan shows both', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.turn.start({ text: 'Add a contact form', turnId: 't1' })
+  await callTool($, {
+    tool: PLAN,
+    steps: ['Build the form', 'Check it sends'],
+    done_when: 'A test message reaches the team inbox',
+    outcome: 'A contact form that emails the team',
+    out_of_scope: ['Restyling the rest of the page'],
+  })
+  const plan = await planPaneTexts($)
+  expect(plan).toContain('Outcome: A contact form that emails the team')
+  expect(plan).toContain('Left out of this job')
+  expect(plan).toContain('Restyling the rest of the page')
+})
+
+test("ideas outside the job wait under Later instead of widening it, and the finished job says so", async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.turn.start({ text: 'Add a contact form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the form'], outcome: 'A contact form that emails the team' })
+  await callTool($, { tool: PROGRESS, task: 'Build the form', percent: 100, later: ['Add a spam filter'] })
+  await $.turn.complete({ answer: 'The form is in.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(await planPaneTexts($)).toContain('Add a spam filter')
+  const band = (await texts($, 'terminal')).join('\n')
+  expect(band).toContain('All done')
+  expect(band).toContain('1 idea saved for later, under Plan')
+})
+
+test("a suggested next prompt doesn't reach the prompt box during or after a job; it waits under Later", async ($, on) => {
+  const clock = world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  let shownBeneath = 0
+  on('prompt.suggest', () => {
+    shownBeneath += 1
+    return { isShown: true } as never
+  })
+  // No job yet: Claude Code's suggestion shows as usual.
+  expect(((await $.prompt.suggest({ text: 'run the tests', origin: { kind: 'suggestion' } } as never)) as { isShown: boolean }).isShown).toBe(true)
+  await $.turn.start({ text: 'Add a contact form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build the form'] })
+  const held = await $.prompt.suggest({ text: 'Now add a newsletter signup', origin: { kind: 'plugin', name: 'next-steps' } } as never)
+  expect((held as { isShown: boolean }).isShown).toBe(false)
+  expect(shownBeneath).toBe(1)
+  expect(await planPaneTexts($)).toContain('Now add a newsletter signup')
+  // Once the finished job has folded away, suggestions show as usual again.
+  await callTool($, { tool: PROGRESS, task: 'Build the form', percent: 100 })
+  await $.turn.complete({ answer: 'The form is in.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(((await $.prompt.suggest({ text: 'Add a spam filter', origin: { kind: 'suggestion' } } as never)) as { isShown: boolean }).isShown).toBe(false)
+  await clock.advance(6_000)
+  expect(((await $.prompt.suggest({ text: 'Write the release notes', origin: { kind: 'suggestion' } } as never)) as { isShown: boolean }).isShown).toBe(true)
+})
+
+test('Claude is asked to settle the outcome and questions first, park the rest, and stop when done', async ($, on) => {
+  world(on)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+  const text = (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:checklist')?.text ?? ''
+  expect(text).toContain('out_of_scope')
+  expect(text).toContain('one AskUserQuestion')
+  expect(text).toContain("report_progress' later")
+  expect(text).toContain('report the last step at 100 and stop')
+})
+
+test('in a Workflow Kit project, Claude is told the Kit plans the job, so there is one plan', async ($, on) => {
+  world(on)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  on('fs.exists', (_, e) => ({ value: (e as { path: string }).path === '/work/.claude/rules/agency-workflow-kit.md' }) as never)
+  const ids = async () =>
+    ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as unknown as { sections: { id: string }[] }).sections.map(one => one.id)
+  await $.session.start({ cwd: '/elsewhere', surface: 'terminal', isInteractive: true } as never)
+  expect(await ids()).not.toContain('glanceflow:workflow-kit')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  expect(await ids()).toContain('glanceflow:workflow-kit')
+})

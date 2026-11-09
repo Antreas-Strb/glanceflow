@@ -120,6 +120,8 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     goal: list.goal ?? null,
     forYou: list.forYou ?? [],
     decided: list.decided ?? [],
+    aim: list.aim ?? null,
+    later: list.later ?? [],
   }
 }
 
@@ -254,8 +256,10 @@ export function teamReport(
     lines.push(tr('Done'))
     for (const one of done) {
       lines.push(`• ${one.title}${took(one)}${one.check ? ` · ${tr(CHECK_WORDS[one.check])}` : ''}`)
+      if (one.aim) lines.push(`  ${tr('Outcome: {0}', one.aim)}`)
       if (one.doneWhen) lines.push(`  ${tr('Done when: {0}', one.doneWhen)}`)
       for (const item of one.decided ?? []) lines.push(`  ${tr('Decided: {0}', item)}`)
+      for (const item of one.later ?? []) lines.push(`  ${tr('Later: {0}', item)}`)
       const notes = one.doneNotes ?? []
       if (notes.some(Boolean)) {
         // What each step got done, in Claude's words where it gave them.

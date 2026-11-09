@@ -117,6 +117,12 @@ export type GlanceChecklist = {
   forYou?: string[]
   /** Choices Claude made that neither the plan nor the person settled. */
   decided?: string[]
+  /** The one end result this job delivers (plan_steps' outcome), as Claude said in its plan. */
+  aim?: string | null
+  /** What this job leaves alone, as Claude said in its plan. */
+  outOfScope?: string[]
+  /** Ideas outside the outcome, parked for the person instead of done now: Claude's own and suggested next prompts. */
+  later?: string[]
 }
 
 /** One plan window and how much of it is used. */
@@ -188,6 +194,8 @@ export type GlanceHistoryEntry = {
   goal?: string | null
   forYou?: string[]
   decided?: string[]
+  aim?: string | null
+  later?: string[]
 }
 
 /** What the history pane shows: one day of one project. */

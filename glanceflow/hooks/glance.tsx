@@ -313,6 +313,8 @@ very next step. Under 300 words, no preamble. Start with exactly: "Checkpoint:"`
 const PROMPT_SECTION = `# GlanceFlow (progress checklist)
 The person follows your work on a checklist above the prompt, in plain English.
 - A question you can answer straight away, with no tools, needs no plan: just answer.
+- For a job, decide what it delivers before you plan: plan_steps' outcome is the one end result, in a sentence, and out_of_scope is what you'll leave alone (with Claude's own task list as the plan, say both in your first message instead). If something only the person can settle would change the plan, ask it now, all at once in one AskUserQuestion, before you start. After that, don't stop to ask unless you're blocked.
+- Stay inside the outcome. An idea outside it (a refactor, a follow-up feature, another page) goes in report_progress' later, not into the work, and your final message doesn't offer follow-ups: the person finds them under Saved for later. When done_when is met, report the last step at 100 and stop.
 - Before you use any other tool, call plan_steps (tool ${PLAN_TOOL}) with 2 to 8 steps in order. If it is deferred, load it with ToolSearch first. If this session has TodoWrite or TaskCreate you may use that to-do list as the plan instead. If it has Claude's own task list (tool ${NATIVE_PLAN}), use that as the plan and do not call plan_steps; report_progress still takes its step names.
 - In plan mode, skip plan_steps while you look around and write the plan. Once the person approves it, call plan_steps with that plan's own steps, then do the work.
 - Give each step a size in plan_steps' sizes list, in the same order: S (a few minutes), M, or L (the biggest pieces of work).
@@ -321,6 +323,12 @@ The person follows your work on a checklist above the prompt, in plain English.
 - Never put file paths, file names, commands, code or tool names in a step name.
 - When something only the person can do or decide comes up, put it in report_progress' for_you; when you choose something neither the plan nor the person settled, put it in decided. One short line each.
 - Fill in plan_steps' done_when: what will be true when the job is done, and what other than you will show it. Make the last step that check. When the job changes code, run the project's tests, build or type check rather than saying it passed. The checklist shows whether changed code was tested.`
+
+const KIT_SECTION = `# GlanceFlow with Workflow Kit
+This project plans its work with Workflow Kit. Its decomposition is the job's plan: call plan_steps once with its work
+orders as the steps (or one step that hands the work to the Director), not a second plan of your own; with Claude's own
+task list as the plan, keep them to that list. Its blocking operator questions go in one AskUserQuestion up front, the
+rest in for_you; the Director's routing choices go in decided.`
 
 const GREEK_SECTION = `# GlanceFlow language
 The person reads GlanceFlow in Greek. Write plan_steps' steps and done_when, report_progress' summary, for_you and
@@ -388,6 +396,8 @@ let toolsRunning = 0
 let isHeldByOther = false
 // GlanceFlow's own tidy-up is compacting: the checkpoint is already written.
 let isTidying = false
+// The project plans its work with Workflow Kit (its rules file is installed): one plan, the Kit's, not two.
+let isKitProject = false
 // A Workflow Kit run the Director started in this chat: its run log, found once, read every few seconds.
 let kit: { since: number; directorId: string; path: string | null; timer: { cancel(): void } } | null = null
 const KIT_EVERY_MS = 5_000
@@ -1171,6 +1181,12 @@ const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') =>
   if (list?.phase === 'background') await settleFinished($, await now($), false)
 }
 
+/** Each line once (in any case), as first said, up to MAX_NOTES: what is known, plus what was just said. */
+const noteLines = (known: string[] | undefined, said: unknown) => {
+  const all = [...(known ?? []), ...(Array.isArray(said) ? said : []).filter(one => String(one ?? '').trim()).map(one => cleanName(one, MAX_SUMMARY))]
+  return all.filter((one, at) => all.findIndex(other => other.toLowerCase() === one.toLowerCase()) === at).slice(0, MAX_NOTES)
+}
+
 /**
  * Tidies the chat up without forgetting: Claude first writes a checkpoint of the work, the compaction is told to keep
  * it, and it stays in Claude's instructions for the rest of this chat. Uses /compact itself when the engine refuses.
@@ -1570,6 +1586,7 @@ export function registerGlance(on: On): void {
   })
   on('session.start', async ($, e, next) => {
     isHeadless = e.isInteractive === false
+    isKitProject = await $.fs.exists(`${e.cwd}/.claude/rules/agency-workflow-kit.md`).catch(() => false)
     void findPlatform($)
       .then(found => {
         platform = found
@@ -1651,6 +1668,15 @@ export function registerGlance(on: On): void {
               'What will be true when the job is done, and what other than you will show it: tests passing, the page ' +
               'loading on a phone, the person trying it. One plain-English sentence, no file names or code.',
           },
+          outcome: {
+            type: 'string',
+            description: 'The one end result this job delivers, in one plain-English sentence, like "A contact form that emails the team".',
+          },
+          out_of_scope: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'What this job leaves alone, so it ends where it should. One short plain-English line each.',
+          },
         },
         required: ['steps'],
       },
@@ -1680,6 +1706,11 @@ export function registerGlance(on: On): void {
             type: 'array',
             items: { type: 'string' },
             description: 'Choices you made in this step that neither the plan nor the person settled, so they can check them. One short plain-English line each.',
+          },
+          later: {
+            type: 'array',
+            items: { type: 'string' },
+            description: "Ideas outside this job's outcome that you noticed (a refactor, a follow-up, another page): parked for the person, not done now. One short plain-English line each.",
           },
         },
         required: ['task', 'percent'],
@@ -1899,6 +1930,8 @@ export function registerGlance(on: On): void {
       sections: [
         ...composed.sections,
         { id: `${PLUGIN}:checklist`, text: PROMPT_SECTION, scope: 'session' as const },
+        // Workflow Kit plans this project's work: its plan is the checklist's, so there is one, not two.
+        ...(isKitProject ? [{ id: `${PLUGIN}:workflow-kit`, text: KIT_SECTION, scope: 'session' as const }] : []),
         // The person reads GlanceFlow in Greek: what Claude writes on the checklist is Greek too.
         ...(currentLang() === 'el' ? [{ id: `${PLUGIN}:language`, text: GREEK_SECTION, scope: 'session' as const }] : []),
         // The outcome beyond the task, across jobs: each plan aims at it.
@@ -2055,6 +2088,18 @@ export function registerGlance(on: On): void {
     return stopped
   })
 
+  // A suggested next prompt (Claude Code's own guess after a turn, or another mod's) would widen the job or start it
+  // over: it waits under Later on the checklist instead of in the prompt box.
+  on('prompt.suggest', async ($, e, next) => {
+    const list = (await read($, enabledAtom)) ? await read($, checklistAtom) : null
+    // Only a planned job still in view: after a quick answer, or once a finished job has folded away, it shows as usual.
+    if (list === null || !list.hasPlan || list.isCollapsed || !e.text.trim()) return next(e)
+    await change($, current => ({ ...current, later: noteLines(current.later, [e.text]) }))
+    // A finished job's history entry was saved already: it gets the parked idea too.
+    if (isFinished(list)) await recordJob($)
+    return { isShown: false }
+  })
+
   // Another mod waits on the person in its own panel while Claude's step runs (Blast Radius holding a command).
   on('ui.open', async ($, e, next) => {
     const opened = await next(e)
@@ -2160,9 +2205,11 @@ export function registerGlance(on: On): void {
       return { deny: `Claude's own task list is this job's plan: keep it with ${NATIVE_PLAN}, and report each step with ${PROGRESS_TOOL} by the same name.` }
     }
     if (tool === PLAN_TOOL) {
-      const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown }
+      const input = e as unknown as { steps?: unknown; sizes?: unknown; done_when?: unknown; outcome?: unknown; out_of_scope?: unknown }
       const steps = (Array.isArray(input.steps) ? input.steps : []).map(one => cleanName(one)).slice(0, 8)
       const doneWhen = String(input.done_when ?? '').trim() ? cleanName(input.done_when, MAX_SUMMARY) : null
+      const outcome = String(input.outcome ?? '').trim() ? cleanName(input.outcome, MAX_SUMMARY) : null
+      const outOfScope = noteLines(undefined, input.out_of_scope)
       const sizes = Array.isArray(input.sizes) ? input.sizes : []
       if (steps.length === 0) {
         return { deny: 'plan_steps needs 2 to 8 step names.' }
@@ -2196,6 +2243,9 @@ export function registerGlance(on: On): void {
         // A new plan without it keeps the one said before.
         doneWhen: doneWhen ?? list?.doneWhen ?? null,
         goal: list ? (list.goal ?? null) : goal,
+        aim: outcome ?? list?.aim ?? null,
+        outOfScope: outOfScope.length > 0 ? outOfScope : (list?.outOfScope ?? []),
+        later: list?.later ?? [],
       }))
       syncTicker($, await read($, checklistAtom))
       saveSoon($)
@@ -2211,23 +2261,19 @@ export function registerGlance(on: On): void {
     }
 
     if (tool === PROGRESS_TOOL) {
-      const input = e as unknown as { task?: unknown; percent?: unknown; summary?: unknown; for_you?: unknown; decided?: unknown }
+      const input = e as unknown as { task?: unknown; percent?: unknown; summary?: unknown; for_you?: unknown; decided?: unknown; later?: unknown }
       const percent = Math.min(100, Math.max(0, Math.round(Number(input.percent) || 0)))
       const name = cleanName(String(input.task ?? ''))
       const summary = percent === 100 && String(input.summary ?? '').trim() ? cleanName(input.summary, MAX_SUMMARY) : null
-      // Each line once (in any case), as first said, up to MAX_NOTES.
-      const added = (known: string[] | undefined, said: unknown) => {
-        const all = [...(known ?? []), ...(Array.isArray(said) ? said : []).filter(one => String(one ?? '').trim()).map(one => cleanName(one, MAX_SUMMARY))]
-        return all.filter((one, at) => all.findIndex(other => other.toLowerCase() === one.toLowerCase()) === at).slice(0, MAX_NOTES)
-      }
       await change($, list => ({
         ...list,
         tasks: applyProgress(list.tasks, name, percent).map(one =>
           summary !== null && one.name.toLowerCase() === name.toLowerCase() ? { ...one, summary } : one,
         ),
         activity: percent === 100 ? null : list.activity,
-        forYou: added(list.forYou, input.for_you),
-        decided: added(list.decided, input.decided),
+        forYou: noteLines(list.forYou, input.for_you),
+        decided: noteLines(list.decided, input.decided),
+        later: noteLines(list.later, input.later),
       }))
 
       return { result: `Progress noted: ${percent}%.` }
@@ -3179,6 +3225,11 @@ export function registerGlance(on: On): void {
             {tr('Goal: {0}', list.goal)}
           </Text>
         )}
+        {list.aim && (
+          <Text key="outcome" wrap="wrap">
+            {tr('Outcome: {0}', list.aim)}
+          </Text>
+        )}
         {list.doneWhen && (
           <Text key="done-when" wrap="wrap">
             {tr('Done when: {0}', list.doneWhen)}
@@ -3188,6 +3239,8 @@ export function registerGlance(on: On): void {
           [
             ['for-you', tr('For you'), list.forYou ?? []],
             ['decided', tr('Decided on its own'), list.decided ?? []],
+            ['out-of-scope', tr('Left out of this job'), list.outOfScope ?? []],
+            ['later', tr('Saved for later'), list.later ?? []],
           ] as [string, string, string[]][]
         ).map(([key, heading, items]) =>
           items.length === 0 ? null : (
@@ -3763,6 +3816,21 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
             </Text>
           </Box>
           {buttons}
+        </Box>
+      ),
+    )
+  }
+
+  // A finished job's parked ideas wait under Plan, instead of a suggested prompt that would start the job over.
+  const parked = list !== null && list.phase === 'done' ? (list.later ?? []).length : 0
+  if (parked > 0) {
+    const words = parked === 1 ? tr('1 idea saved for later, under Plan') : tr('{0} ideas saved for later, under Plan', parked)
+    warnings.push(
+      vector ? (
+        line('later', kit.badge('bookmark', 'quiet', NOTICE()), <Text wrap="truncate-end">{words}</Text>)
+      ) : (
+        <Box key="later" flexDirection="row" width={columns}>
+          <Text dimColor wrap="truncate-end">{`· ${words}`}</Text>
         </Box>
       ),
     )
