@@ -6357,6 +6357,16 @@ test("a suggested next prompt doesn't reach the prompt box during or after a job
   expect(((await $.prompt.suggest({ text: 'Write the release notes', origin: { kind: 'suggestion' } } as never)) as { isShown: boolean }).isShown).toBe(true)
 })
 
+test('a parked suggestion keeps its file names, so Saved for later has the whole prompt', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('prompt.suggest', () => ({ isShown: true }) as never)
+  await $.turn.start({ text: 'Write the notes', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Write the notes'] })
+  await $.prompt.suggest({ text: 'Commit notes.md and hello.py', origin: { kind: 'suggestion' } } as never)
+  expect(await planPaneTexts($)).toContain('Commit notes.md and hello.py')
+})
+
 test('Claude is asked to settle the outcome and questions first, park the rest, and stop when done', async ($, on) => {
   world(on)
   on('prompt.compose', () => ({ sections: [] }) as never)

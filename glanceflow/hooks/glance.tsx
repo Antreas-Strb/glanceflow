@@ -1183,8 +1183,8 @@ const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') =>
 }
 
 /** Each line once (in any case), as first said, up to MAX_NOTES: what is known, plus what was just said. */
-const noteLines = (known: string[] | undefined, said: unknown) => {
-  const all = [...(known ?? []), ...(Array.isArray(said) ? said : []).filter(one => String(one ?? '').trim()).map(one => cleanName(one, MAX_SUMMARY))]
+const noteLines = (known: string[] | undefined, said: unknown, clean = (one: unknown) => cleanName(one, MAX_SUMMARY)) => {
+  const all = [...(known ?? []), ...(Array.isArray(said) ? said : []).filter(one => String(one ?? '').trim()).map(clean)]
   return all.filter((one, at) => all.findIndex(other => other.toLowerCase() === one.toLowerCase()) === at).slice(0, MAX_NOTES)
 }
 
@@ -2095,7 +2095,12 @@ export function registerGlance(on: On): void {
     const list = (await read($, enabledAtom)) ? await read($, checklistAtom) : null
     // Only a planned job still in view: after a quick answer, or once a finished job has folded away, it shows as usual.
     if (list === null || !list.hasPlan || list.isCollapsed || !e.text.trim()) return next(e)
-    await change($, current => ({ ...current, later: noteLines(current.later, [e.text]) }))
+    // A prompt the person may take later keeps its file names, which cleanName would drop ("Commit notes.md and hello.py").
+    const whole = (one: unknown) => {
+      const text = maskPrivate(String(one)).replace(/\s+/g, ' ').trim()
+      return text.length <= MAX_SUMMARY ? text : `${text.slice(0, MAX_SUMMARY - 1)}…`
+    }
+    await change($, current => ({ ...current, later: noteLines(current.later, [e.text], whole) }))
     // A finished job's history entry was saved already: it gets the parked idea too.
     if (isFinished(list)) await recordJob($)
     return { isShown: false }
