@@ -104,6 +104,7 @@ export function entryFromChecklist(list: GlanceChecklist, project: string, costU
     outcome: list.phase === 'needsYou' && list.finishedAt !== null ? 'done' : OUTCOME[list.phase],
     stepsDone: list.tasks.filter(one => one.status === 'done').length,
     stepsTotal: list.tasks.length,
+    ...(list.hasPlan && list.plannedCount > 0 ? { stepsPlanned: list.plannedCount } : {}),
     newTokens: tokens - cached,
     cachedTokens: cached,
     doneSteps: list.hasPlan ? list.tasks.filter(one => one.status === 'done').map(one => one.name) : [],
@@ -311,6 +312,18 @@ const weekday = (day: string) => dateLabel(day, { weekday: 'long' })
  * A personal summary of the 7 days up to `day`, across every project: how many steps Claude checked off,
  * in how many tasks, the time, the busiest day and the biggest tasks. Plain words, made to share.
  */
+/** Of the planned jobs that say how big their first plan was, how many ended with more steps than it. */
+export function planGrowth(entries: readonly GlanceHistoryEntry[]): { grew: number; planned: number } {
+  const planned = entries.filter(one => !one.isQuickAnswer && (one.stepsPlanned ?? 0) > 0)
+  return { grew: planned.filter(one => one.stepsTotal > one.stepsPlanned!).length, planned: planned.length }
+}
+
+/** "2 of 5 grew past their first plan", or '' when no job says how big its first plan was. */
+export function growthWords(entries: readonly GlanceHistoryEntry[]): string {
+  const { grew, planned } = planGrowth(entries)
+  return planned === 0 ? '' : tr('{0} of {1} grew past their first plan', grew, planned)
+}
+
 export function weekSummary(entries: readonly GlanceHistoryEntry[], day: string): string {
   const jobs = entries.filter(one => !one.isQuickAnswer)
   const heading = tr('Your week with Claude · {0} to {1}', shortDay(shiftDay(day, -(WEEK_DAYS - 1))), shortDay(day))
@@ -336,6 +349,8 @@ export function weekSummary(entries: readonly GlanceHistoryEntry[], day: string)
     projects.size > 1 ? tr('Time at work: {0}, across {1} projects.', plainDuration(time), projects.size) : tr('Time at work: {0}.', plainDuration(time)),
   ]
   if (perDay.size > 1) lines.push(tr('Busiest day: {0}, with {1}.', weekday(busiest), tasks_(busiestCount)))
+  const growth = planGrowth(jobs)
+  if (growth.planned > 0) lines.push(tr('{0} of {1} tasks grew past their first plan.', growth.grew, growth.planned))
   if (biggest.length > 0) {
     lines.push('', tr('Biggest tasks'))
     for (const one of biggest) lines.push(`• ${one.title} (${steps_(one.doneSteps.length)})`)

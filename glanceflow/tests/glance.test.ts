@@ -6380,3 +6380,44 @@ test('in a Workflow Kit project, Claude is told the Kit plans the job, so there 
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
   expect(await ids()).toContain('glanceflow:workflow-kit')
 })
+
+test('History counts the jobs that grew past their first plan', async ($, on) => {
+  world(on)
+  historyWorld(on, { cwd: '/work/landing-site' })
+  // One job keeps to its plan.
+  await $.turn.start({ text: 'Fix the footer', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Fix it'] })
+  await callTool($, { tool: PROGRESS, task: 'Fix it', percent: 100 })
+  await $.turn.complete({ answer: 'Fixed.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  // Another gains a step on the way.
+  await $.turn.start({ text: 'Build my landing page', turnId: 't2' })
+  await callTool($, { tool: PLAN, steps: ['Write it'] })
+  await callTool($, { tool: PROGRESS, task: 'Write it', percent: 100 })
+  await callTool($, { tool: PROGRESS, task: 'Add a pricing table', percent: 100 })
+  await $.turn.complete({ answer: 'Ready.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await $.command.run({ command: 'glanceflow', args: 'history' } as never)
+  expect((await paneTexts($)).join('\n')).toContain('1 of 2 grew past their first plan')
+})
+
+test('the week summary says how many tasks grew past their first plan', () => {
+  const at = new Date(2026, 9, 6, 9, 0).getTime()
+  const job = (id: string, planned: number | undefined, total: number) => ({
+    jobId: id,
+    project: '/work',
+    startedAt: at,
+    finishedAt: at + 60_000,
+    title: `Job ${id}`,
+    outcome: 'done' as const,
+    stepsDone: total,
+    stepsTotal: total,
+    ...(planned === undefined ? {} : { stepsPlanned: planned }),
+    newTokens: 0,
+    cachedTokens: 0,
+    doneSteps: Array.from({ length: total }, (_, n) => `Step ${n + 1}`),
+    openSteps: [],
+    isQuickAnswer: false,
+  })
+  const week = weekSummary([job('a', 2, 4), job('b', 3, 3), job('c', undefined, 5)], '2026-10-06')
+  expect(week).toContain('1 of 2 tasks grew past their first plan.')
+  expect(weekSummary([job('c', undefined, 5)], '2026-10-06')).not.toContain('first plan')
+})

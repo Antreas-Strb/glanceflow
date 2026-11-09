@@ -170,6 +170,8 @@ export type GlanceHistoryEntry = {
   outcome: GlanceOutcome
   stepsDone: number
   stepsTotal: number
+  /** Steps in the job's first plan; absent for a quick answer and for jobs saved before 0.33. */
+  stepsPlanned?: number
   newTokens: number
   cachedTokens: number
   /** Names of the steps it finished, for the team report. */
