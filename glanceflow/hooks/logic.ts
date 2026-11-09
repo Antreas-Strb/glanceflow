@@ -1502,3 +1502,54 @@ export function otherChatsWords(others: readonly GlanceOtherChat[]): string[] {
  */
 export const holdsForPerson = (pane: { id: string; focus?: true }, ownPrefix: string, toolsRunning: number) =>
   pane.focus === true && !pane.id.startsWith(ownPrefix) && toolsRunning > 0
+
+/** One work order of a Workflow Kit run, as its run log tells it. */
+export type KitNode = { id: string; label: string; role: string | null; status: 'upcoming' | 'running' | 'done' | 'failed' }
+
+/** A work order's id as words: `build-form` reads `Build form`. */
+const kitLabel = (id: string) => {
+  const words = id.replace(/[-_]+/g, ' ').trim()
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+const KIT_STATUS: Record<string, KitNode['status']> = {
+  node_started: 'running',
+  node_activity: 'running',
+  retry_started: 'running',
+  node_completed: 'done',
+  node_failed: 'failed',
+  retry_exhausted: 'failed',
+}
+
+/**
+ * Workflow Kit's run log (`events.jsonl`, one JSON event a line): its work orders and whether the run is over. Null
+ * when it isn't a run of this folder's project, or began before `since` (a minute's grace for clocks).
+ */
+export function kitRun(log: string, cwd: string, since: number): { nodes: KitNode[]; isOver: boolean; startedAt: number } | null {
+  const events: { event?: unknown; work_id?: unknown; role?: unknown; ts?: unknown; detail?: Record<string, unknown> }[] = []
+  for (const line of log.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      events.push(JSON.parse(line))
+    } catch {
+      // A line still being written: the next read has it whole.
+    }
+  }
+  const start = events.find(one => one.event === 'run_started')
+  const root = (start?.detail?.orchestrator as { repo_root?: unknown } | undefined)?.repo_root
+  const startedAt = typeof start?.ts === 'string' ? Date.parse(start.ts) : NaN
+  if (typeof root !== 'string' || !(cwd === root || cwd.startsWith(`${root}/`)) || !(startedAt >= since - 60_000)) return null
+  const ids = Array.isArray(start?.detail?.work_ids) ? (start.detail.work_ids as unknown[]).filter((id): id is string => typeof id === 'string') : []
+  const nodes = new Map<string, KitNode>(ids.map(id => [id, { id, label: kitLabel(id), role: null, status: 'upcoming' }]))
+  for (const one of events) {
+    if (typeof one.work_id !== 'string') continue
+    const node = nodes.get(one.work_id) ?? { id: one.work_id, label: kitLabel(one.work_id), role: null, status: 'upcoming' as const }
+    const status = KIT_STATUS[String(one.event)]
+    nodes.set(one.work_id, {
+      ...node,
+      role: typeof one.role === 'string' ? one.role.replace(/^agency-/, '') : node.role,
+      status: status ?? node.status,
+    })
+  }
+  return { nodes: [...nodes.values()], isOver: events.some(one => one.event === 'run_terminal'), startedAt }
+}
