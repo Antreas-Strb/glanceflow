@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, holdsForPerson, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, holdsForPerson, kitRun, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 import { GREEK } from '../hooks/words'
 
@@ -366,6 +366,68 @@ test("a compaction GlanceFlow didn't start still gets Claude's checkpoint first"
   const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
   const checkpoint = (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:checkpoint')
   expect(checkpoint?.text).toContain('the pricing page is done')
+})
+
+const KIT_LOG = [
+  { event: 'run_started', ts: '1970-01-01T00:16:40.000Z', work_id: null, role: null, detail: { work_ids: ['inspect-api', 'build-form', 'review-form'], orchestrator: { repo_root: '/work' } } },
+  { event: 'node_started', ts: '1970-01-01T00:16:41.000Z', work_id: 'inspect-api', role: 'agency-researcher', detail: {} },
+  { event: 'node_completed', ts: '1970-01-01T00:16:50.000Z', work_id: 'inspect-api', role: 'agency-researcher', detail: {} },
+  { event: 'node_started', ts: '1970-01-01T00:16:51.000Z', work_id: 'build-form', role: 'agency-coder', detail: {} },
+].map(one => JSON.stringify(one)).join('\n')
+
+test("Workflow Kit's run log reads as work orders, only for this folder's project and only from runs since the Director started", () => {
+  const run = kitRun(KIT_LOG, '/work/app', 1_000_000)
+  expect(run?.nodes.map(one => [one.label, one.role, one.status])).toEqual([
+    ['Inspect api', 'researcher', 'done'],
+    ['Build form', 'coder', 'running'],
+    ['Review form', null, 'upcoming'],
+  ])
+  expect(run?.isOver).toBe(false)
+  expect(kitRun(KIT_LOG, '/elsewhere', 1_000_000)).toBe(null)
+  expect(kitRun(KIT_LOG, '/work', 1_000_000 + 5 * 60_000)).toBe(null)
+  expect(kitRun(`${KIT_LOG}\n{"event":"run_terminal","work_id":null}\n{"event":"node_comp`, '/work', 1_000_000)?.isOver).toBe(true)
+})
+
+test("while Workflow Kit's Director runs, its work orders show as helpers under the step", async ($, on) => {
+  const clock = world(on)
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'director' }) as never)
+  on('session.cwd', () => ({ value: '/work' }) as never)
+  on('env.get', (_, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/home/me' : undefined }) as never)
+  const runs = '/home/me/.local/state/studio/runs'
+  on('fs.exists', () => ({ value: true }) as never)
+  on('fs.list', (_, e) => {
+    const path = (e as { path: string }).path
+    return { value: path === runs ? [{ name: 'proj', kind: 'dir', size: 0 }] : [{ name: 'run1', kind: 'dir', size: 0 }] } as never
+  })
+  on('fs.read', () => ({ value: KIT_LOG }) as never)
+  await detailsOn($)
+  await $.turn.start({ text: 'Add a contact form', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Hand the work to the Director'] })
+  await $.agent.spawn({ tool_use_id: 'tu1', prompt: 'Run it', description: 'Run the work order', subagentType: 'agency-director', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false } as never)
+  await clock.advance(5_000)
+  const shown = (await texts($, 'terminal')).join('\n')
+  expect(shown).toContain('Inspect api')
+  expect(shown).toContain('Build form')
+  expect(shown).not.toContain('Review form')
+})
+
+test("a helper working out of sight doesn't make the job look stuck", async ($, on) => {
+  const clock = world(on)
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'a1' }) as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Research it', 'Write it'] })
+  await $.agent.spawn({ tool_use_id: 'tu1', prompt: 'Research', description: 'Research the market', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false } as never)
+  await clock.advance(4 * 60_000)
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('no news')
+})
+
+test("an agent team's lead can message its teammates before a plan", async ($, on) => {
+  world(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'Split the review across the team', turnId: 't1' })
+  const sent = await callTool($, { tool: 'SendMessage', to: 'reviewer', message: 'Take the API files' } as never)
+  expect(sent.deny).toBeUndefined()
 })
 
 test('a finished job says All done and collapses after 5 seconds', async ($, on) => {
