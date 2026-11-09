@@ -38,7 +38,7 @@ import {
 import { findSecrets, maskPrivate, setMasking } from './privacy'
 import { currentLang, setLang, tr } from './words'
 import type { Lang } from './words'
-import {
+import { holdsForPerson,
   MAX_DETAIL,
   CHECK_WORDS,
   MAX_NAME,
@@ -221,6 +221,8 @@ const STALLED = 'no news for 3 minutes. Press Esc to stop Claude, or give it a l
 // No sign of life from Claude (a piece of its reply, a tool starting or ending) for this long while it works.
 const STALL_MS = 3 * 60_000
 const PERMISSION = "Answer Claude's request in the chat"
+// Another mod opened a panel that took the keyboard while Claude's step runs (Blast Radius holding a command, say).
+const HELD = "Another mod is waiting for your answer in its panel"
 // What a mark beside a state's own bold word says: the word follows, so a screen reader hears it once, not twice.
 const STATUS = () => tr('Status')
 // What a mark beside a notice says: a usage limit, a full chat, a tidy-up, a panel with nothing in it yet. The words
@@ -379,6 +381,11 @@ let isHeadless = false
 let isAgentSession = false
 // Where the prompt now entering came from (prompt.submit's origin), read once by the turn it starts.
 let enteringFrom: string | null = null
+// Main-thread tool calls in flight, and whether another mod's panel holds one for the person.
+let toolsRunning = 0
+let isHeldByOther = false
+// GlanceFlow's own tidy-up is compacting: the checkpoint is already written.
+let isTidying = false
 // Turns nobody typed: a background task's notice, another session's message, an observer's report.
 const UNTYPED = new Set(['task-notification', 'peer', 'peer-send-message', 'observer', 'observer-activity'])
 // The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
@@ -1105,25 +1112,35 @@ const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') =>
  * Tidies the chat up without forgetting: Claude first writes a checkpoint of the work, the compaction is told to keep
  * it, and it stays in Claude's instructions for the rest of this chat. Uses /compact itself when the engine refuses.
  */
-const tidyUp = async ($: $) => {
-  $.ui.toast(tr('Saving a checkpoint, then tidying up the chat…'))
+/** Claude writes a checkpoint of the work and it is kept for this chat; null when none came back. */
+const saveCheckpoint = async ($: $): Promise<string | null> => {
   let note: string | null = null
   try {
     const reply = await $.model.fork({ prompt: CHECKPOINT_PROMPT })
     if (reply.isAnswered && reply.text.trim()) note = reply.text.trim()
   } catch {
-    // Tidying up still helps without a checkpoint.
+    // Compacting still helps without a checkpoint.
   }
   if (note !== null) {
     const at = await now($)
     await $.store.set(CHECKPOINT_KEY, { sessionId: await $.session.id(), at, note })
     await update($, checkpointAtom, () => at)
-  } else {
-    $.ui.toast(tr("Couldn't save a checkpoint; tidying up anyway."))
   }
-  const instructions = note === null ? '' : `Keep everything in this checkpoint; it is what the work needs to carry on.\n\n${note}`
+  return note
+}
+
+const keepNote = (note: string) => `Keep everything in this checkpoint; it is what the work needs to carry on.\n\n${note}`
+
+const tidyUp = async ($: $) => {
+  $.ui.toast(tr('Saving a checkpoint, then tidying up the chat…'))
+  const note = await saveCheckpoint($)
+  if (note === null) $.ui.toast(tr("Couldn't save a checkpoint; tidying up anyway."))
+  const instructions = note === null ? '' : keepNote(note)
   try {
-    const done = await $.session.compact(note === null ? undefined : { instructions })
+    isTidying = true
+    const done = await $.session.compact(note === null ? undefined : { instructions }).finally(() => {
+      isTidying = false
+    })
     if (done.skip !== undefined) $.ui.toast(tr('The chat was not tidied up: {0}', done.skip))
     else if (note !== null) await update($, recapAtom, () => true)
     return
@@ -1956,7 +1973,36 @@ export function registerGlance(on: On): void {
     })
     await settleFinished($, await now($), false)
 
-    return next(e)
+    const stopped = await next(e)
+    if (stopped.block !== undefined) {
+      // A Stop hook beneath (a check, a gate) sent Claude back to work: the job isn't done after all.
+      collapse?.cancel()
+      await change($, current =>
+        current.phase === 'done' || (current.phase === 'needsYou' && current.needsYouReason === QUESTION)
+          ? { ...current, phase: 'working', finishedAt: null, needsYouReason: null, question: null, isCollapsed: false }
+          : current,
+      )
+    }
+    return stopped
+  })
+
+  // Another mod waits on the person in its own panel while Claude's step runs (Blast Radius holding a command).
+  on('ui.open', async ($, e, next) => {
+    const opened = await next(e)
+    if (holdsForPerson(e, PLUGIN, toolsRunning) && (await read($, enabledAtom))) {
+      isHeldByOther = true
+      await setNeedsYou($, HELD)
+    }
+    return opened
+  })
+
+  // A compaction GlanceFlow didn't start (the engine's, /compact, another mod's): Claude writes the checkpoint first,
+  // so the work's goal, decisions and next step survive it.
+  on('session.compact', async ($, e, next) => {
+    if (isTidying || e.agentId !== undefined || e.trigger === 'precompute' || !(await read($, enabledAtom))) return next(e)
+    const note = await saveCheckpoint($)
+    if (note === null) return next(e)
+    return next({ ...e, instructions: [e.instructions, keepNote(note)].filter(Boolean).join('\n\n') })
   })
 
   on('turn.start', async ($, e, next) => {
@@ -2186,9 +2232,16 @@ export function registerGlance(on: On): void {
 
     // Past every check above, so a refusal here never uses up the approval.
     if (isMerging) approvedSha = null
-    const ran = await next(e)
+    toolsRunning += 1
+    const ran = await next(e).finally(() => {
+      toolsRunning -= 1
+    })
     if (isMerging) noteMerge(ran)
     noteSign($)
+    if (isHeldByOther && toolsRunning === 0) {
+      isHeldByOther = false
+      await setWorking($)
+    }
 
     if (ran.deny !== undefined) {
       return ran

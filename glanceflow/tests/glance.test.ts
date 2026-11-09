@@ -5,7 +5,7 @@ import type { GlanceHistoryEntry, GlanceOutcome } from '../types'
 
 import { activityOf, asksQuestion, carryTokens, questionOf, isButtonsOnly, isContinueWords, liftButtons, isLatinText, isStartWords, cleanName, sentenceCase, localTimes, resetTime, fit, formatCost, formatTokens, headerDetails, ownWords, wholePieces, prettyModel, tokenNote } from '../hooks/glance'
 import { findSecrets, maskPrivate } from '../hooks/privacy'
-import { OTHER_WAITING_MS, OTHER_WORKING_MS, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
+import { OTHER_WAITING_MS, OTHER_WORKING_MS, holdsForPerson, permissionWords, applyCheck, isNewerVersion, askedMergeSha, checkResult, decodeEscapes, hasMergeRoute, jobCheck, needsCheck, runsCheck, isMcpMergeAction, otherChats, otherChatsWords, powerShellText, runsPowerShellMerge, runsPrMerge, shellPieces, staleResumeKeys, toggled, unsafeMerge, unsafePowerShellMerge } from '../hooks/logic'
 import { dayEntries, dayFromArgument, dayKey, expiredHistoryKeys, filesNote, historyDay, historyKey, longDay, mergedEntries, paceFromHistory, sharedDayKeys, shiftDay, teamReport, weekSummary } from '../hooks/history'
 import { GREEK } from '../hooks/words'
 
@@ -314,6 +314,58 @@ test("a headless run (claude -p) isn't given the checklist instructions", async 
   expect(await ids()).not.toContain('glanceflow:checklist')
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
   expect(await ids()).toContain('glanceflow:checklist')
+})
+
+test('when a Stop hook sends Claude back to work, All done goes away again', async ($, on) => {
+  world(on)
+  let isGateShut = true
+  on('classic.Stop', () => (isGateShut ? { block: 'Run the tests before you say it is done.' } : {}) as never)
+  await $.turn.start({ text: 'Build my landing page', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Build it'] } as never)
+  await callTool($, { tool: PROGRESS, task: 'Build it', percent: 100 } as never)
+  await $.turn.complete({ answer: 'Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect((await texts($, 'terminal')).join('\n')).toContain('All done')
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as never)
+  expect((await texts($, 'terminal')).join('\n')).not.toContain('All done')
+
+  // Once the gate lets the stop through, the job finishes as usual.
+  isGateShut = false
+  await $.turn.complete({ answer: 'Tests pass. Done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.classic.Stop({ stop_hook_active: true, background_tasks: [] } as never)
+  expect((await texts($, 'terminal')).join('\n')).toContain('All done')
+})
+
+test("another mod's panel that takes the keyboard during one of Claude's steps counts as waiting on the person", () => {
+  // The test engine can't open a panel as another plugin, so the rule the ui.open hook applies is checked directly.
+  expect(holdsForPerson({ id: 'blast-radius', focus: true }, 'glanceflow', 1)).toBe(true)
+  expect(holdsForPerson({ id: 'blast-radius', focus: true }, 'glanceflow', 0)).toBe(false)
+  expect(holdsForPerson({ id: 'blast-radius' }, 'glanceflow', 1)).toBe(false)
+  expect(holdsForPerson({ id: 'glanceflow-plan', focus: true }, 'glanceflow', 1)).toBe(false)
+  expect(GREEK['Another mod is waiting for your answer in its panel']).toBeTruthy()
+})
+
+test("a compaction GlanceFlow didn't start still gets Claude's checkpoint first", async ($, on) => {
+  world(on)
+  const forked: string[] = []
+  on('model.fork', (_, e) => {
+    forked.push(e.prompt)
+    return { value: { isAnswered: true, text: 'Checkpoint: the pricing page is done; next, the contact form.', usage: {} } } as never
+  })
+  let instructions = ''
+  on('session.compact', (_, e) => {
+    instructions = String((e as { instructions?: string }).instructions ?? '')
+    return { messages: [{ role: 'user', text: 'Summary of the chat so far.', toolUses: [] }] } as never
+  })
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('session.id', () => ({ value: 's1' }) as never)
+  await $.session.compact({ instructions: 'Keep the API notes', messages: [{ role: 'user', text: 'Build the pricing page', toolUses: [] }] } as never)
+  expect(forked[0]).toContain('Write a checkpoint')
+  expect(instructions).toContain('Keep the API notes')
+  expect(instructions).toContain('the pricing page is done')
+  const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)
+  const checkpoint = (composed as unknown as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'glanceflow:checkpoint')
+  expect(checkpoint?.text).toContain('the pricing page is done')
 })
 
 test('a finished job says All done and collapses after 5 seconds', async ($, on) => {
