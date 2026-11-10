@@ -72,6 +72,8 @@ export type GlanceChecklist = {
   needsYouReason: string | null
   /** What Claude asked, in its own words, when the turn ended on a question; shown in place of the general reason. */
   question?: string | null
+  /** The question came from Claude Desktop's wrap_up box (its buttons): the answer finishes this job, not a new one. */
+  isClosingAsk?: boolean
   stuckReason: string | null
   startedAt: number
   finishedAt: number | null
