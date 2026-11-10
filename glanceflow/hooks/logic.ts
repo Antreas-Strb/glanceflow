@@ -1260,6 +1260,13 @@ export function unsafePowerShellMerge(command: string, approvedSha: string | nul
 export const MAX_QUESTION = 160
 
 /** The question Claude ended on, as one plain line: its last sentence, or the whole last paragraph when that sentence is a few words. */
+/** The question an AskUserQuestion call asks, for the line: up to its first "?", masked and kept short. */
+export function askedQuestion(text: unknown): string | null {
+  const line = typeof text === 'string' ? maskPrivate(text.replace(/\s+/g, ' ').trim()) : ''
+  const asked = line.match(/^[^?？]*[?？]/)?.[0] ?? line
+  return asked === '' ? null : asked.length > MAX_QUESTION ? `${asked.slice(0, MAX_QUESTION - 1)}…` : asked
+}
+
 export function questionOf(answer: string): string | null {
   if (!asksQuestion(answer)) return null
   const paragraph = (answer.trim().split(/\n\s*\n/).pop() ?? '').replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim()

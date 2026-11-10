@@ -818,6 +818,38 @@ test('the desktop notice carries the question too', async ($, on) => {
   expect(shown).toEqual([['Claude needs you', 'Postgres or SQLite, which do you prefer?']])
 })
 
+test("Claude's question after a permission prompt takes the line and sends a fresh notice", async ($, on) => {
+  let band = ''
+  const clock = world(on, (async (_: unknown, e: { tool: string }) => {
+    // Claude's question dialog comes with a permission prompt of its own, while the question waits.
+    if (e.tool === 'AskUserQuestion') {
+      await $.classic.Notification({ message: 'Claude needs your permission to use AskUserQuestion', notification_type: 'permission_prompt' } as never)
+      await clock.advance(1)
+      band = (await texts($, 'terminal')).join('\n')
+    }
+    return { result: {} }
+  }) as never)
+  const shown: string[][] = []
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: readonly string[] }).argv
+    if (argv[0] === 'osascript') throw new Error('osascript: not found')
+    shown.push([...argv.slice(-2)])
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  await $.command.run({ command: 'glanceflow', args: 'notify on' } as never)
+  await clock.advance(1)
+  await $.turn.start({ text: 'Write a launch post', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Ask who it is for', 'Write it'] })
+  await callTool($, { tool: 'Bash', command: 'ls' })
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+  await clock.advance(1)
+  shown.length = 0
+  await callTool($, { tool: 'AskUserQuestion', questions: [{ question: 'Who is the launch post for? (The folder is empty.)', options: [] }] } as never)
+  expect(band).toContain('Who is the launch post for?')
+  expect(band).not.toContain('OK to run a command')
+  expect(shown).toEqual([['Claude needs you', 'Who is the launch post for?']])
+})
+
 test('while a plan waits for Start, the row offers Start and no Pause', async ($, on) => {
   world(on)
   await $.command.run({ command: 'glanceflow', args: 'approve on' } as never)
