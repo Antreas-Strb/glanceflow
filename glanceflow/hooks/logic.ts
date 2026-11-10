@@ -57,7 +57,8 @@ export function cleanName(raw: unknown, max = MAX_NAME): string {
   if (!name) {
     return tr('Working on it')
   }
-  name = name.charAt(0).toUpperCase() + name.slice(1)
+  // An id like a work order's (gf-livecheck-3, task_12) keeps its case; words start with a capital.
+  if (!/^\S*\d/.test(name) || !/^\S*[-_]/.test(name)) name = name.charAt(0).toUpperCase() + name.slice(1)
   if (name.length <= max) {
     return name
   }
