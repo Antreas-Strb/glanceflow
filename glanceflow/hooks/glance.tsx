@@ -93,6 +93,7 @@ import { holdsForPerson,
   prettyModel,
   projectPath,
   questionOf,
+  askedQuestion,
   reconcileBackground,
   reportOf,
   resetTime,
@@ -2281,7 +2282,18 @@ export function registerGlance(on: On): void {
     }
 
     if (tool === 'AskUserQuestion') {
-      await setNeedsYou($, QUESTION)
+      // Its question goes on the line. A prompt already waiting (a permission) gives way to it, with a fresh notice.
+      const asked = (e as unknown as { questions?: { question?: unknown }[] }).questions?.[0]?.question
+      const wasWaiting = list?.phase === 'needsYou'
+      const asking = await change($, current =>
+        current.phase === 'done' || current.phase === 'stopped'
+          ? current
+          : { ...current, phase: 'needsYou', needsYouReason: QUESTION, question: askedQuestion(asked) },
+      )
+      if (wasWaiting && asking?.phase === 'needsYou') {
+        void alertFor($, asking)
+        void noticeFor($, asking)
+      }
     } else if (list?.phase === 'needsYou') {
       await setWorking($)
     }
@@ -2444,8 +2456,10 @@ export function registerGlance(on: On): void {
   on('classic.Notification', async ($, e, next) => {
     const kind = String(e.notification_type ?? '')
     if (/permission/i.test(kind)) {
-      // What the waiting call asks, in plain words, beside Claude Code's own dialog with the raw command.
-      await setNeedsYou($, permissionWords((await read($, checklistAtom))?.activity ?? null) ?? PERMISSION)
+      // What the waiting call asks, in plain words, beside Claude Code's own dialog with the raw command. Claude's own
+      // question comes as a permission prompt too: its question stays on the line.
+      const list = await read($, checklistAtom)
+      if (list?.needsYouReason !== QUESTION) await setNeedsYou($, permissionWords(list?.activity ?? null) ?? PERMISSION)
     } else if (/elicitation|question/i.test(kind)) {
       await setNeedsYou($, QUESTION)
     }
