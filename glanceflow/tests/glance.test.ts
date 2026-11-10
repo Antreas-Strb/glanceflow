@@ -93,6 +93,13 @@ describe('clean names', () => {
     expect(cleanName('Fix styles.css and the menu')).toBe('Fix and the menu')
   })
 
+  test('a work order id at the start keeps its case; words still start with a capital', () => {
+    expect(cleanName('gf-livecheck-3 Director live check')).toBe('gf-livecheck-3 Director live check')
+    expect(cleanName('task_12 fix the form')).toBe('task_12 fix the form')
+    expect(cleanName('re-run the tests')).toBe('Re-run the tests')
+    expect(cleanName('add 3 cards')).toBe('Add 3 cards')
+  })
+
   test('an 80-character name trims to 40 or less at a word boundary', () => {
     const long = 'Rewrite the welcome message so that it sounds warmer and friendlier to new visitors'
     const name = cleanName(long)
