@@ -538,6 +538,14 @@ export const needsCheck = (path: string) => !/\.(?:md|mdx|txt|rst)$/i.test(path)
 export const applyCheck = (tasks: GlanceTask[], result: GlanceCheck): GlanceTask[] =>
   tasks.map(one => (one.check === undefined || (one.check === 'passed' && result === 'failed') ? one : { ...one, check: result }))
 
+/** Helpers in order, each one's own (the Director's specialists) right after it at depth 1. */
+export function nestHelpers<T extends { id: string; parentId?: string }>(helpers: T[]): { helper: T; depth: number }[] {
+  const ids = new Set(helpers.map(one => one.id))
+  return helpers
+    .filter(one => one.parentId === undefined || !ids.has(one.parentId))
+    .flatMap(one => [{ helper: one, depth: 0 }, ...helpers.filter(child => child.parentId === one.id).map(helper => ({ helper, depth: 1 }))])
+}
+
 /** Whether version `latest` (like 0.27.0) comes after `current`; a part that isn't a number counts as 0. */
 export function isNewerVersion(latest: string, current: string): boolean {
   const a = latest.split('.').map(part => Number.parseInt(part, 10) || 0)
