@@ -5297,8 +5297,11 @@ test('the other chats worth a word: those that need you first, then those at wor
     at,
   )
   expect(others.map(one => one.title)).toEqual(['Fix the form', 'Build the pricing page', 'Write the email'])
-  expect(otherChatsWords(others)).toEqual(['2 other chats need you: Fix the form, Build the pricing page', '1 more at work'])
-  expect(otherChatsWords(others.slice(1, 2))).toEqual(['Another chat needs you: Build the pricing page'])
+  expect(otherChatsWords(others, true)).toEqual(['2 other chats need you: Fix the form, Build the pricing page', '1 more at work'])
+  expect(otherChatsWords(others.slice(1, 2), true)).toEqual(['Another chat needs you: Build the pricing page'])
+  // Without names (the default), only how many.
+  expect(otherChatsWords(others)).toEqual(['2 other chats need you', '1 more at work'])
+  expect(otherChatsWords(others.slice(1, 2))).toEqual(['Another chat needs you'])
   expect(otherChatsWords(others.slice(2))).toEqual(['1 other chat at work'])
   expect(otherChatsWords([])).toEqual([])
 })
@@ -5307,7 +5310,7 @@ test('the band names another chat that needs you, on every surface, and keeps up
   const saved = (title: string, phase: string) => ({
     at: 1_000_000, isOpen: true, list: { title, phase, tasks: [], helpers: [], startedAt: 1_000_000, finishedAt: null },
   })
-  const { clock, store } = resumeWorld(on, { 'resume:chat-2': saved('Write the email', 'working') })
+  const { clock, store } = resumeWorld(on, { 'resume:chat-2': saved('Write the email', 'working'), glanceOtherNames: true })
   await $.session.start({ cwd: '/work', surface: 'terminal' } as never)
   for (const surface of SURFACES) {
     expect((await texts($, surface)).join('\n')).toContain('1 other chat at work')
@@ -5409,6 +5412,7 @@ test('in a narrow band the chat that needs you is named, never left out for the 
   const { clock } = resumeWorld(on, {
     'resume:chat-2': saved('Write the welcome email for the launch', 'working'),
     'resume:chat-3': saved('Build the pricing page with three plans', 'needsYou'),
+    glanceOtherNames: true,
   })
   await $.session.start({ cwd: '/work', surface: 'terminal' } as never)
   await clock.advance(20_000)
@@ -5417,6 +5421,22 @@ test('in a narrow band the chat that needs you is named, never left out for the 
     expect(shown).toContain('Another chat needs you')
     expect(shown).not.toContain('more at work')
   }
+})
+
+test("other chats show as a count by default, so a shared screen names no other project; 'others names' names them", async ($, on) => {
+  const saved = (title: string, phase: string) => ({
+    at: 1_000_000, isOpen: true, list: { title, phase, tasks: [], helpers: [], startedAt: 1_000_000, finishedAt: null },
+  })
+  const { clock } = resumeWorld(on, { 'resume:chat-3': saved('Show Gary Curtis video on homepage', 'needsYou') })
+  await $.session.start({ cwd: '/work', surface: 'terminal' } as never)
+  await clock.advance(20_000)
+  for (const surface of SURFACES) {
+    const shown = (await texts($, surface)).join('\n')
+    expect(shown).toContain('Another chat needs you')
+    expect(shown).not.toContain('Gary Curtis')
+  }
+  await $.command.run({ command: 'glanceflow', args: 'others names' } as never)
+  expect((await texts($, 'terminal')).join('\n')).toContain('Another chat needs you: Show Gary Curtis video on homepage')
 })
 
 const PLAN_PANE = {

@@ -175,6 +175,8 @@ const SHIP_KEY = 'glanceShip'
 const NOTICE_KEY = 'glanceNotice'
 // Whether the band names the other chats that need the person; on unless turned off.
 const OTHERS_KEY = 'glanceOthers'
+// Whether the other chats line names them (off by default, so a shared screen shows only how many).
+const OTHER_NAMES_KEY = 'glanceOtherNames'
 const TOUR_KEY = 'glanceTour'
 /**
  * The welcome, three short cards the first time: what the checklist is, what Needs you means, where the rest lives.
@@ -258,6 +260,7 @@ const checkpointAtom = atom({ plugin: 'glanceflow', key: 'checkpointAt' } as con
 const recapAtom = atom({ plugin: 'glanceflow', key: 'isRecapShown' } as const, false)
 const othersAtom = atom({ plugin: 'glanceflow', key: 'otherChats' } as const, [])
 const showsOthersAtom = atom({ plugin: 'glanceflow', key: 'showsOthers' } as const, true)
+const namesOthersAtom = atom({ plugin: 'glanceflow', key: 'namesOthers' } as const, false)
 // shortcut: each read of the store parses its whole file, one per other chat; fine for 20 chats every 20 s, a single
 // shared key would read once but brings back the race of two chats saving at once.
 const OTHERS_EVERY_MS = 20_000
@@ -1270,9 +1273,13 @@ const setNotice = async ($: $, isOn: boolean) => {
 }
 
 /** The line naming the other chats that need the person: off before sharing the screen, say. */
-const setOthers = async ($: $, isOn: boolean) => {
+const setOthers = async ($: $, isOn: boolean, isNamed?: boolean) => {
   await update($, showsOthersAtom, () => isOn)
   await $.store.set(OTHERS_KEY, isOn)
+  if (isNamed !== undefined) {
+    await update($, namesOthersAtom, () => isNamed)
+    await $.store.set(OTHER_NAMES_KEY, isNamed)
+  }
   if (isOn) await refreshOthers($).catch(() => undefined)
 }
 
@@ -1578,6 +1585,8 @@ export function registerGlance(on: On): void {
     await update($, noticeAtom, () => isNoticing)
     const showsOthers = (await $.store.get(OTHERS_KEY)) !== false
     await update($, showsOthersAtom, () => showsOthers)
+    const namesOthers = (await $.store.get(OTHER_NAMES_KEY)) === true
+    await update($, namesOthersAtom, () => namesOthers)
     const tidyAt = await $.store.get(TIDY_KEY)
     await update($, tidyAtAtom, () => (typeof tidyAt === 'number' ? tidyAt : TIDY_AT_DEFAULT))
     const saved = (await $.store.get(CHECKPOINT_KEY)) as { sessionId?: string; at?: number } | undefined
@@ -1743,9 +1752,14 @@ export function registerGlance(on: On): void {
       }
     }
     if (arg.startsWith('others')) {
-      const isOn = toggled(arg.slice('others'.length).trim(), await read($, showsOthersAtom))
-      await setOthers($, isOn)
-      return { text: isOn ? tr('The band names another chat on this computer that needs you.') : tr('The band no longer mentions other chats.') }
+      const choice = arg.slice('others'.length).trim()
+      if (choice === 'names') {
+        await setOthers($, true, true)
+        return { text: tr('The band names another chat on this computer that needs you.') }
+      }
+      const isOn = toggled(choice, await read($, showsOthersAtom))
+      await setOthers($, isOn, false)
+      return { text: isOn ? tr('The band says how many other chats need you, without their names.') : tr('The band no longer mentions other chats.') }
     }
     if (arg.startsWith('approve')) {
       const choice = arg.slice('approve'.length).trim()
@@ -2589,6 +2603,7 @@ export function registerGlance(on: On): void {
     const language = await read($, languageAtom)
     const isNoticing = await read($, noticeAtom)
     const showsOthers = await read($, showsOthersAtom)
+    const namesOthers = await read($, namesOthersAtom)
     const isGuarded = await read($, guardAtom)
     const approves = await read($, approveAtom)
     const ships = await read($, shipOnGithubAtom)
@@ -2748,11 +2763,18 @@ export function registerGlance(on: On): void {
           'others',
           'eye',
           tr('Other chats'),
-          showsOthers ? tr('On') : tr('Off'),
-          choice('others', [['off', tr('Off')], ['on', tr('On')]], showsOthers ? 'on' : 'off', value => setOthers($, value === 'on')),
-          showsOthers
-            ? tr('The band names another chat on this computer that needs you, from any project. Turn off before you share your screen.')
-            : tr('Turn on to see when another chat on this computer needs you.'),
+          !showsOthers ? tr('Off') : namesOthers ? tr('With names') : tr('On'),
+          choice(
+            'others',
+            [['off', tr('Off')], ['on', tr('On')], ['names', tr('With names')]],
+            !showsOthers ? 'off' : namesOthers ? 'names' : 'on',
+            value => setOthers($, value !== 'off', value === 'names'),
+          ),
+          !showsOthers
+            ? tr('Turn on to see when another chat on this computer needs you.')
+            : namesOthers
+              ? tr('The band names another chat on this computer that needs you, from any project. Turn off before you share your screen.')
+              : tr('The band says how many other chats on this computer need you, without their names.'),
         )}
         {group(
           'language',
@@ -3602,7 +3624,7 @@ async function drawBand($: $, e: BandEvent, maxRows: number, beneath: RenderElem
   const warnings: RenderChildren[] = []
   // The other chats on this computer: one that needs the person, in amber, else how many are at work, quietly.
   const others = isEnabled && (await read($, showsOthersAtom)) ? await read($, othersAtom) : []
-  const otherWords = otherChatsWords(others)
+  const otherWords = otherChatsWords(others, await read($, namesOthersAtom))
   // Who needs the person comes first and is never left out for the shorter count after it: cut to whole words instead.
   const otherLine = (room: number) => wholePieces(widthOf(otherWords[0] ?? '') <= room ? otherWords : otherWords.slice(0, 1), room)
   if (otherWords.length > 0) {
