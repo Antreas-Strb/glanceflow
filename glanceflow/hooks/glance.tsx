@@ -317,7 +317,7 @@ very next step. Under 300 words, no preamble. Start with exactly: "Checkpoint:"`
 const PROMPT_SECTION = `# GlanceFlow (progress checklist)
 The person follows your work on a checklist above the prompt, in plain English.
 - A question you can answer straight away, with no tools, needs no plan: just answer.
-- For a job, decide what it delivers before you plan: plan_steps' outcome is the one end result, in a sentence, and out_of_scope is what you'll leave alone (with Claude's own task list as the plan, say both in your first message instead). If something only the person can settle would change the plan, ask it now, all at once in one AskUserQuestion, before you start. After that, don't stop to ask unless you're blocked.
+- For a job, decide what it delivers before you plan: plan_steps' outcome is the one end result, in a sentence, and out_of_scope is what you'll leave alone (with Claude's own task list as the plan, give outcome, out_of_scope and done_when in your first report_progress instead). If something only the person can settle would change the plan, ask it now, all at once in one AskUserQuestion, before you start. After that, don't stop to ask unless you're blocked.
 - Stay inside the outcome. An idea outside it (a refactor, a follow-up feature, another page) goes in report_progress' later, not into the work, and your final message doesn't offer follow-ups: the person finds them under Saved for later. When done_when is met, report the last step at 100 and stop.
 - Before you use any other tool, call plan_steps (tool ${PLAN_TOOL}) with 2 to 8 steps in order. If it is deferred, load it with ToolSearch first. If this session has TodoWrite or TaskCreate you may use that to-do list as the plan instead. If it has Claude's own task list (tool ${NATIVE_PLAN}), use that as the plan and do not call plan_steps; report_progress still takes its step names.
 - In plan mode, skip plan_steps while you look around and write the plan. Once the person approves it, call plan_steps with that plan's own steps, then do the work.
@@ -1668,6 +1668,19 @@ export function registerGlance(on: On): void {
             items: { type: 'string' },
             description: "Ideas outside this job's outcome that you noticed (a refactor, a follow-up, another page): parked for the person, not done now. One short plain-English line each.",
           },
+          outcome: {
+            type: 'string',
+            description: "Only with Claude's own task list as the plan, in the first report: the one end result this job delivers, in one plain-English sentence.",
+          },
+          out_of_scope: {
+            type: 'array',
+            items: { type: 'string' },
+            description: "Only with Claude's own task list as the plan, in the first report: what this job leaves alone. One short plain-English line each.",
+          },
+          done_when: {
+            type: 'string',
+            description: "Only with Claude's own task list as the plan, in the first report: what will be true when the job is done, and what other than you will show it.",
+          },
         },
         required: ['task', 'percent'],
       },
@@ -2224,7 +2237,21 @@ export function registerGlance(on: On): void {
     }
 
     if (tool === PROGRESS_TOOL) {
-      const input = e as unknown as { task?: unknown; percent?: unknown; summary?: unknown; for_you?: unknown; decided?: unknown; later?: unknown }
+      const input = e as unknown as {
+        task?: unknown
+        percent?: unknown
+        summary?: unknown
+        for_you?: unknown
+        decided?: unknown
+        later?: unknown
+        outcome?: unknown
+        out_of_scope?: unknown
+        done_when?: unknown
+      }
+      // With Claude Desktop's own task list there is no plan_steps: the job's outcome comes with its first report.
+      const outcome = String(input.outcome ?? '').trim() ? cleanName(input.outcome, MAX_SUMMARY) : null
+      const doneWhen = String(input.done_when ?? '').trim() ? cleanName(input.done_when, MAX_SUMMARY) : null
+      const outOfScope = noteLines(undefined, input.out_of_scope)
       const percent = Math.min(100, Math.max(0, Math.round(Number(input.percent) || 0)))
       const name = cleanName(String(input.task ?? ''))
       const summary = percent === 100 && String(input.summary ?? '').trim() ? cleanName(input.summary, MAX_SUMMARY) : null
@@ -2237,6 +2264,9 @@ export function registerGlance(on: On): void {
         forYou: noteLines(list.forYou, input.for_you),
         decided: noteLines(list.decided, input.decided),
         later: noteLines(list.later, input.later),
+        aim: outcome ?? list.aim ?? null,
+        doneWhen: doneWhen ?? list.doneWhen ?? null,
+        outOfScope: outOfScope.length > 0 ? outOfScope : (list.outOfScope ?? []),
       }))
 
       return { result: `Progress noted: ${percent}%.` }

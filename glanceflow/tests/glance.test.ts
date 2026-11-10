@@ -6373,6 +6373,23 @@ describe("Claude Desktop's own task list", () => {
     expect(shown).not.toContain('Placeholders are fine')
   })
 
+  test("with its own list, the job's outcome comes with the first report and shows in the Plan", async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, {
+      tool: PROGRESS,
+      task: 'Build the page',
+      percent: 10,
+      outcome: 'A landing page with a sign-up form',
+      out_of_scope: ['The pricing page'],
+      done_when: 'The form works on a phone',
+    })
+    const plan = await planPaneTexts($)
+    expect(plan).toContain('Outcome: A landing page with a sign-up form')
+    expect(plan).toContain('The pricing page')
+    expect(plan).toContain('Done when: The form works on a phone')
+  })
+
   test('wrap_up with no question, or an empty one, still ends on All done', async ($, on) => {
     world(on)
     for (const [index, ask] of [undefined, '', '   ', 7].entries()) {
