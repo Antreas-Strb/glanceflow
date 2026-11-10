@@ -39,7 +39,7 @@ import {
 import { findSecrets, maskPrivate, setMasking } from './privacy'
 import { currentLang, setLang, tr } from './words'
 import type { Lang } from './words'
-import { holdsForPerson, kitRun,
+import { holdsForPerson,
   MAX_DETAIL,
   CHECK_WORDS,
   MAX_NAME,
@@ -401,9 +401,6 @@ let isHeldByOther = false
 let isTidying = false
 // The project plans its work with Workflow Kit (its rules file is installed): one plan, the Kit's, not two.
 let isKitProject = false
-// A Workflow Kit run the Director started in this chat: its run log, found once, read every few seconds.
-let kit: { since: number; directorId: string; path: string | null; timer: { cancel(): void } } | null = null
-const KIT_EVERY_MS = 5_000
 // Turns nobody typed: a background task's notice, another session's message, an observer's report.
 const UNTYPED = new Set(['task-notification', 'peer', 'peer-send-message', 'observer', 'observer-activity'])
 // The question Claude Desktop's end-of-turn box asked the person this turn (wrap_up's `ask`): Claude's answer may not repeat it.
@@ -1131,62 +1128,7 @@ const stopHelper = async ($: $, helper: GlanceHelper) => {
   if (failed.deny !== undefined || failed.isError) $.ui.toast(tr("Couldn't stop it: {0}", failed.deny ?? failed.text ?? tr('Claude Code said no')))
 }
 
-/** Workflow Kit's newest run log for this folder that began since the Director started; null when there is none yet. */
-const findKitLog = async ($: $, since: number): Promise<string | null> => {
-  const state = (await $.env.get('XDG_STATE_HOME')) ?? `${await $.env.get('HOME')}/.local/state`
-  const base = `${state}/studio/runs`
-  if (!(await $.fs.exists(base).catch(() => false))) return null
-  const cwd = await $.session.cwd()
-  let found: { path: string; at: number } | null = null
-  for (const project of await $.fs.list(base)) {
-    if (project.kind !== 'dir') continue
-    for (const run of await $.fs.list(`${base}/${project.name}`).catch(() => [])) {
-      const path = `${base}/${project.name}/${run.name}/events.jsonl`
-      if (run.kind !== 'dir' || !(await $.fs.exists(path).catch(() => false))) continue
-      const got = kitRun(await $.fs.read(path).catch(() => ''), cwd, since)
-      if (got !== null && (found === null || got.startedAt > found.at)) found = { path, at: got.startedAt }
-    }
-  }
-  return found?.path ?? null
-}
-
-/** Reads the run log and shows each work order that has started as a helper under the current step. */
-const followKit = async ($: $) => {
-  const run = kit
-  if (run === null) return
-  run.path ??= await findKitLog($, run.since)
-  if (run.path === null) return
-  const got = kitRun(await $.fs.read(run.path), await $.session.cwd(), run.since)
-  if (got === null) return
-  const list = await read($, checklistAtom)
-  for (const node of got.nodes) {
-    if (node.status === 'upcoming') continue
-    const id = `kit:${node.id}`
-    const status = node.status === 'running' ? 'running' : node.status
-    const was = list?.helpers.find(one => one.id === id)
-    if (was === undefined) {
-      await addHelper($, { id, kind: 'helper', label: node.label, type: node.role ?? 'work order', isBackground: false, model: '', effort: null, status, tokens: 0 })
-    } else if (was.status !== status) {
-      await change($, current => ({ ...current, helpers: current.helpers.map(one => (one.id === id ? { ...one, status } : one)) }))
-    }
-  }
-  if (got.isOver) await endKit($, false)
-}
-
-/** The Director finished or the run ended: one last read, and a work order still running didn't finish. */
-const endKit = async ($: $, isLastRead = true) => {
-  if (kit === null) return
-  if (isLastRead) await followKit($).catch(() => undefined)
-  kit?.timer.cancel()
-  kit = null
-  await change($, current => ({
-    ...current,
-    helpers: current.helpers.map(one => (one.id.startsWith('kit:') && one.status === 'running' ? { ...one, status: 'failed' as const } : one)),
-  }))
-}
-
 const finishHelper = async ($: $, agentId: string, status: 'done' | 'failed') => {
-  if (kit !== null && kit.directorId === agentId) await endKit($)
   const list = await change($, current => ({
     ...current,
     helpers: current.helpers.map(one => (one.id === agentId && one.status === 'running' ? { ...one, status } : one)),
@@ -2051,12 +1993,6 @@ export function registerGlance(on: On): void {
         status: 'running',
         tokens: 0,
       })
-      // Workflow Kit's Director runs work orders through its own engine: follow its run log.
-      if (e.subagentType === 'agency-director') {
-        kit?.timer.cancel()
-        const agentId = started.agentId
-        kit = { since: await now($), directorId: agentId, path: null, timer: $.clock.every(KIT_EVERY_MS, () => void followKit($).catch(() => undefined)) }
-      }
     }
 
     return started
