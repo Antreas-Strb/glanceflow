@@ -3077,10 +3077,12 @@ export function registerGlance(on: On): void {
         </Box>
       )
     // A line under a step, in line with its name. A command keeps to one line, cut at the edge.
-    const note = (key: string, text: string, icon?: RenderChildren, isOneLine = false) =>
+    // depth: a Director's specialist sits one mark further in, under its Director.
+    const note = (key: string, text: string, icon?: RenderChildren, isOneLine = false, depth = 0) =>
       vector ? (
         <Box key={key} flexDirection="row" gap={1} width={columns}>
           {kit.blank()}
+          {depth > 0 && kit.blank()}
           {icon}
           <Box flexShrink={1} minWidth={0}>
             <Text dimColor wrap={isOneLine ? 'truncate-end' : 'wrap'}>
@@ -3111,6 +3113,8 @@ export function registerGlance(on: On): void {
                   : helper.status === 'failed'
                     ? kit.badge('close', 'alert', tr('Failed'), 13)
                     : kit.badge('check', 'ok', tr('Done'), 13),
+                false,
+                depth,
               )
             : note(`helper-${helper.id}`, `${'  '.repeat(depth)}↳ ${mark} ${words}`)
           // A helper's own transcript opens in the main view; one working in the background can be stopped alone

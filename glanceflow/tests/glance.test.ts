@@ -461,6 +461,28 @@ test("the Director's specialists sit indented under the Director, in the band an
   expect(plan.indexOf(row('Report README heading'))).toBeLessThan(plan.indexOf(row('Look around')))
 })
 
+test("in the Desktop Plan the Director's specialist sits one mark further in than the Director", async ($, on) => {
+  world(on)
+  const ids = ['director', 'r1']
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: ids.shift() }) as never)
+  await $.turn.start({ text: 'Check the README heading', turnId: 't1' })
+  await callTool($, { tool: PLAN, steps: ['Hand the work to the Director'] })
+  const spawn = (description: string, subagentType: string, parentAgentId?: string) =>
+    $.agent.spawn({ tool_use_id: description, prompt: 'Go', description, subagentType, parentAgentId, provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false } as never)
+  await spawn('Run the work order', 'agency-director')
+  await spawn('Report README heading', 'agency-researcher', 'director')
+  const plan = await $.ui.mount({ ...PLAN_PANE, surface: 'desktop' })
+  const boxes = await plan.findAll({ type: 'Box' })
+  await plan.unmount()
+  // Blank marks before the row's own mark: the indent.
+  const leading = (key: string) => {
+    const kids = ((boxes.find(one => one.props.key === key) as unknown as { children?: { type: string }[] })?.children ?? [])
+    return kids.findIndex(kid => kid.type === 'Svg')
+  }
+  expect(leading('helper-director')).toBe(1)
+  expect(leading('helper-r1')).toBe(2)
+})
+
 test("a helper working out of sight doesn't make the job look stuck", async ($, on) => {
   const clock = world(on)
   on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'a1' }) as never)
