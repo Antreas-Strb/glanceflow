@@ -6359,6 +6359,20 @@ describe("Claude Desktop's own task list", () => {
     }
   })
 
+  test("answering wrap_up's box, with one of its buttons or typed, finishes the same job under its own title", async ($, on) => {
+    world(on)
+    await native($)
+    await callTool($, { tool: NATIVE, done: [1, 2, 3, 4] })
+    await callTool($, { tool: WRAP_UP, recap: 'Wrote the post.', ask: "Tell me the app's name so I can fill in the placeholders?" })
+    await $.turn.complete({ answer: 'Wrote the post.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    await $.turn.start({ text: 'Placeholders are fine', turnId: 't2' })
+    await $.turn.complete({ answer: 'Okay, launch.md stays as it is.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+    const shown = await rows($, 'terminal')
+    expect(shown).toContain('All done')
+    expect(shown).toContain('Build my landing page')
+    expect(shown).not.toContain('Placeholders are fine')
+  })
+
   test('wrap_up with no question, or an empty one, still ends on All done', async ($, on) => {
     world(on)
     for (const [index, ask] of [undefined, '', '   ', 7].entries()) {

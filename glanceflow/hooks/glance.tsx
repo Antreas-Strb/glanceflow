@@ -2122,6 +2122,10 @@ export function registerGlance(on: On): void {
         finishedAt: null,
         isCollapsed: false,
       }))
+    } else if (text && !text.startsWith('/') && current?.isClosingAsk === true && current.phase === 'needsYou') {
+      // The answer to Claude Desktop's wrap_up box (one of its buttons, or typed): the same job finishes, keeping its
+      // title. A free question Claude ends a finished job with still makes the reply a new job.
+      await change($, list => ({ ...list, phase: 'working', needsYouReason: null, question: null, isClosingAsk: false, finishedAt: null, isCollapsed: false }))
     } else if (text && !text.startsWith('/')) {
       const list = current
       if (list === null || isFinished(list) || list.phase === 'stopped' || list.phase === 'background') {
@@ -2541,6 +2545,7 @@ export function registerGlance(on: On): void {
           phase: isAsking ? 'needsYou' : 'done',
           needsYouReason: isAsking ? QUESTION : null,
           question: asked,
+          isClosingAsk: wrappedAsk !== null,
           stuckReason: null,
           finishedAt: finished,
           tasks: current.tasks.map(one => ({ ...one, status: 'done' as const, percent: 100, hasReported: true })),
