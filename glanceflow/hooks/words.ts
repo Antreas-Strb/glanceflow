@@ -238,6 +238,11 @@ export const GREEK: Readonly<Record<string, string>> = {
   '{0} other chats at work': '{0} ακόμα συζητήσεις δουλεύουν',
   'Another chat needs you: {0}': 'Μια άλλη συζήτηση σε χρειάζεται: {0}',
   '{0} other chats need you: {1}': '{0} άλλες συζητήσεις σε χρειάζονται: {1}',
+  'Another chat needs you': 'Μια άλλη συζήτηση σε χρειάζεται',
+  '{0} other chats need you': '{0} άλλες συζητήσεις σε χρειάζονται',
+  'With names': 'Με ονόματα',
+  'The band says how many other chats need you, without their names.': 'Η μπάρα λέει πόσες άλλες συζητήσεις σε χρειάζονται, χωρίς τα ονόματά τους.',
+  'The band says how many other chats on this computer need you, without their names.': 'Η μπάρα λέει πόσες άλλες συζητήσεις σε αυτόν τον υπολογιστή σε χρειάζονται, χωρίς τα ονόματά τους.',
   '{0} more at work': 'δουλεύουν ακόμα {0}',
 
   // Sounds and notices

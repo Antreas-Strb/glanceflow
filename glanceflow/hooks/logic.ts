@@ -1515,12 +1515,16 @@ export function otherChats(saved: readonly (SavedChecklist | undefined)[], at: n
 }
 
 /** What the band says of the other chats, in whole pieces: who needs the person first, then how many are at work. */
-export function otherChatsWords(others: readonly GlanceOtherChat[]): string[] {
+/** The other chats as words: how many need the person, and their titles only when the person chose to see names. */
+export function otherChatsWords(others: readonly GlanceOtherChat[], isNamed = false): string[] {
   const waiting = others.filter(one => one.needsYou)
   const working = others.length - waiting.length
   if (waiting.length === 0) return working === 0 ? [] : [working === 1 ? tr('1 other chat at work') : tr('{0} other chats at work', working)]
-  const first =
-    waiting.length === 1
+  const first = !isNamed
+    ? waiting.length === 1
+      ? tr('Another chat needs you')
+      : tr('{0} other chats need you', waiting.length)
+    : waiting.length === 1
       ? tr('Another chat needs you: {0}', waiting[0]?.title ?? '')
       : tr('{0} other chats need you: {1}', waiting.length, waiting.map(one => one.title).join(', '))
   return [first, ...(working === 0 ? [] : [tr('{0} more at work', working)])]

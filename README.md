@@ -108,7 +108,7 @@ The checklist also survives closing Claude Code: resume the chat (`claude --resu
 
 ## Settings
 
-**⚙ Settings** under the checklist (or `/glanceflow settings`) puts every choice in one panel. Each shows what is picked and a line on what that choice does: the view (Simple, Details or Off), sounds (with ▶ Play it to hear them), desktop notices, other chats (the band names another chat on this computer that needs you, from any project; turn it off before you share your screen, or use `/glanceflow others off`), calm mode, whether to approve the plan first, the password guard, and when to tidy up the chat (never, or at 40, 50, 60 or 75% full), with a **Tidy up now** button. Changes apply right away and stay for your next chats.
+**⚙ Settings** under the checklist (or `/glanceflow settings`) puts every choice in one panel. Each shows what is picked and a line on what that choice does: the view (Simple, Details or Off), sounds (with ▶ Play it to hear them), desktop notices, other chats (the band says how many other chats on this computer need you, from any project, without their names; pick **With names** or `/glanceflow others names` to see which, and `/glanceflow others off` to hide the line), calm mode, whether to approve the plan first, the password guard, and when to tidy up the chat (never, or at 40, 50, 60 or 75% full), with a **Tidy up now** button. Changes apply right away and stay for your next chats.
 
 ![The Settings panel in the Desktop app: a menu for each choice, from the view and sounds to the password guard and when to tidy up](docs/glanceflow-settings.png)
 
@@ -186,7 +186,7 @@ The steps follow the finish flow of [Ponytail](https://github.com/DietrichGebert
 | `/glanceflow notify on`, `/glanceflow notify off` | A notice from your computer when Claude needs you, gets stuck or finishes a long job |
 | `/glanceflow calm on`, `/glanceflow calm off` | Nothing moves; statuses in bold |
 | `/glanceflow language el`, `/glanceflow language en` | GlanceFlow in Greek, or in English (the default) |
-| `/glanceflow others on`, `/glanceflow others off` | Whether the band names another chat on this computer that needs you |
+| `/glanceflow others on`, `/glanceflow others names`, `/glanceflow others off` | Whether the band says how many other chats on this computer need you, names them too, or says nothing |
 | `/glanceflow guard on`, `/glanceflow guard off` | Turns the password guard on or off |
 | `/glanceflow approve on`, `/glanceflow approve off` | Claude waits for ▶ Start before it works, or starts right away |
 | `/glanceflow ship on`, `/glanceflow ship off` | Whether a finished job in a GitHub project offers ⇡ Ship it; off also ends a Ship it that is running, at once |
